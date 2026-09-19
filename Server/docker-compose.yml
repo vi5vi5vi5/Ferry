@@ -1,0 +1,54 @@
+# Ferry: релей + nginx-терминатор TLS.
+#
+# Запуск и обновление:  ./tools/update.sh --force
+#
+# Наружу опубликован только proxy: 443 — https и wss, 80 — редирект на
+# https и ACME-challenge. Порт приложения (8080) наружу не торчит.
+# Переопределить порты хоста:
+#   HTTPS_PORT=8443 HTTP_PORT=8081 docker compose up -d --build
+#
+# TLS: без DOMAIN — самоподписанный сертификат (браузер и curl будут
+# ругаться, клиенту понадобится --insecure). С доменом — Let's Encrypt по
+# HTTP-01 с автопродлением:
+#   DOMAIN=ferry.example.ru LETSENCRYPT_EMAIL=you@mail.com docker compose up -d --build
+# В режиме с доменом HTTP_PORT переопределять нельзя: challenge всегда
+# идёт на внешний порт 80.
+
+services:
+  app:
+    build:
+      # Контекст — корень репозитория: образ собирает сервер, общее ядро и
+      # CLI-клиент, который потом раздаётся через /install.sh.
+      context: ..
+      dockerfile: Server/Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_MODIFIED: ${GIT_MODIFIED:-0}
+    restart: unless-stopped
+    volumes:
+      # ЕДИНСТВЕННОЕ, что Ferry читает с диска, — ferry.conf. Данных
+      # раздач здесь нет и не будет: они живут в оперативке и умирают
+      # вместе с процессом. Это обещание продукта, а не недоработка.
+      - ./mount:/app/mount:ro
+
+  proxy:
+    build: proxy
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      - DOMAIN=${DOMAIN:-}
+      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL:-}
+    volumes:
+      - certs:/etc/nginx/certs
+      - letsencrypt:/etc/letsencrypt
+    depends_on:
+      - app
+
+volumes:
+  # Самоподписанный сертификат + симлинки live/: живут между запусками.
+  certs:
+  # Сертификаты Let's Encrypt и аккаунт certbot. Не удалять — иначе
+  # повторный запрос упрётся в rate limit.
+  letsencrypt:

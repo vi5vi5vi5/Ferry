@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry — паром для файлов</title>
+<style>
+/* Временная страница. Дизайн-система Ferry (docs/ferry-mockups) приезжает
+   вместе с веб-клиентом в M3; здесь ровно столько стилей, чтобы страница
+   не выглядела заброшенной и читалась в обеих темах. */
+:root {
+  --bg: #fbfaf8; --ink: #1a1a18; --ink-2: #5a5a54; --line: #ddd9d2;
+  --accent: #0f5c68; --code-bg: #f2efe9;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14150f; --ink: #e8e6df; --ink-2: #9a978c; --line: #2e2f28;
+    --accent: #6fb6c2; --code-bg: #1d1e17;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 48px 16px 64px; background: var(--bg); color: var(--ink);
+  font: 16px/1.6 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+main { max-width: 680px; margin: 0 auto; }
+h1 { font-size: 28px; margin: 0 0 4px; letter-spacing: -0.01em; }
+.sub { color: var(--ink-2); margin: 0 0 40px; }
+h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.08em;
+     color: var(--ink-2); margin: 40px 0 12px; font-weight: 600; }
+pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px;
+      padding: 14px 16px; overflow-x: auto; margin: 0 0 12px;
+      font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+p { margin: 0 0 14px; }
+ul { margin: 0 0 14px; padding-left: 20px; }
+li { margin-bottom: 6px; }
+a { color: var(--accent); }
+hr { border: 0; border-top: 1px solid var(--line); margin: 40px 0; }
+.note { color: var(--ink-2); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Ferry</h1>
+  <p class="sub">Паром для файлов. Перевёз и ушёл.</p>
+
+  <p>Это релей больших файлов. Он ничего не хранит на диске: в оперативке —
+  идентификатор раздачи, сокеты и скользящее окно байтов, которое тут же
+  вытесняется. Перезапуск сервера гасит все раздачи, и это нормально.</p>
+
+  <p>Шифрование происходит на вашем устройстве. Сервер видит только шифротекст:
+  ни содержимого, ни имени файла, ни ключа у него нет и быть не может.</p>
+
+  <h2>Поставить клиент</h2>
+  <pre id="install">curl -fsSL https://…/install.sh | sh</pre>
+  <p class="note">Один файл, никаких пакетов и служб. Адрес этого релея
+  пропишется сам — дальше достаточно команды ниже.</p>
+
+  <h2>Отправить файл</h2>
+  <pre>ferry send большой-файл.tar.zst</pre>
+  <p>Команда напечатает ссылку. Передайте её целиком, вместе с частью после
+  решётки: <strong>эта часть и есть ключ шифрования</strong>, и на сервер она
+  никогда не уходит.</p>
+
+  <h2>Забрать</h2>
+  <pre>ferry get "https://…/t/…#…"</pre>
+  <p class="note">Ссылку — в кавычках: без них шелл съест всё после решётки,
+  то есть ключ.</p>
+
+  <hr>
+
+  <h2>Чего пока нет</h2>
+  <ul>
+    <li><strong>Приёма в браузере.</strong> Сейчас на обоих концах нужен
+        клиент из командной строки. Веб-получатель — следующий шаг.</li>
+    <li><strong>Позднего подключения.</strong> Получатели должны стартовать,
+        пока раздача не ушла дальше окна.</li>
+    <li><strong>Папок.</strong> Пока один файл за раз; папку упакуйте
+        архивом.</li>
+  </ul>
+
+  <p class="note">Исходники: <a href="https://github.com/vi5vi5vi5/Ferry">github.com/vi5vi5vi5/Ferry</a>
+  · состояние релея: <a href="/api/health">/api/health</a></p>
+</main>
+<script>
+// Адрес подставляем на клиенте: страница статическая, а релей может
+// открываться и по домену, и по IP, и через чужой прокси.
+document.getElementById('install').textContent =
+  'curl -fsSL ' + location.origin + '/install.sh | sh';
+</script>
+</body>
+</html>

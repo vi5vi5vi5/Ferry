@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry — раздача</title>
+<style>
+:root {
+  --bg: #fbfaf8; --ink: #1a1a18; --ink-2: #5a5a54; --line: #ddd9d2;
+  --accent: #0f5c68; --code-bg: #f2efe9; --warn: #8a5a00;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14150f; --ink: #e8e6df; --ink-2: #9a978c; --line: #2e2f28;
+    --accent: #6fb6c2; --code-bg: #1d1e17; --warn: #d6a44a;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 48px 16px 64px; background: var(--bg); color: var(--ink);
+  font: 16px/1.6 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+main { max-width: 680px; margin: 0 auto; }
+h1 { font-size: 24px; margin: 0 0 4px; }
+.sub { color: var(--ink-2); margin: 0 0 32px; }
+h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.08em;
+     color: var(--ink-2); margin: 32px 0 10px; font-weight: 600; }
+pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px;
+      padding: 14px 16px; overflow-x: auto; margin: 0 0 10px; white-space: pre-wrap;
+      word-break: break-all;
+      font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+button { font: inherit; font-size: 14px; padding: 7px 14px; border: 1px solid var(--line);
+         border-radius: 4px; background: transparent; color: var(--ink); cursor: pointer; }
+button:hover { border-color: var(--accent); color: var(--accent); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+p { margin: 0 0 14px; }
+a { color: var(--accent); }
+.warn { color: var(--warn); }
+.note { color: var(--ink-2); font-size: 14px; }
+.meta { border: 1px solid var(--line); border-radius: 4px; padding: 0; margin: 0 0 24px; }
+.meta div { display: flex; gap: 12px; padding: 9px 16px; border-bottom: 1px solid var(--line);
+            font-size: 14px; }
+.meta div:last-child { border-bottom: 0; }
+.meta b { font-weight: 500; color: var(--ink-2); min-width: 120px; }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Раздача Ferry</h1>
+  <p class="sub" id="state">читаю ссылку…</p>
+
+  <div class="meta" id="meta" hidden>
+    <div><b>идентификатор</b><span class="mono" id="m-id"></span></div>
+    <div><b>размер</b><span id="m-size"></span></div>
+    <div><b>чанки</b><span id="m-chunks"></span></div>
+    <div><b>состояние</b><span id="m-state"></span></div>
+  </div>
+
+  <div id="haskey" hidden>
+    <h2>Забрать</h2>
+    <pre id="cmd"></pre>
+    <button id="copy">Скопировать команду</button>
+    <p class="note" style="margin-top:14px">
+      Клиента ещё нет? Одна команда:
+      <span class="mono" id="install"></span>
+    </p>
+  </div>
+
+  <div id="nokey" hidden>
+    <h2 class="warn">В ссылке нет ключа</h2>
+    <p>Ключ — это часть ссылки после решётки. До сервера она не доходит
+    никогда, поэтому подставить её здесь невозможно: расшифровать том без
+    неё нельзя ни нам, ни серверу.</p>
+    <p>Попросите отправителя прислать ссылку целиком.</p>
+  </div>
+
+  <h2>Что это</h2>
+  <p>Имя файла и его содержимое зашифрованы на устройстве отправителя.
+  Сервер видит только шифротекст, размер и количество чанков — что именно
+  здесь лежит, знает лишь тот, у кого есть ключ.</p>
+  <p class="note">Приём прямо в браузере появится следующим шагом. Пока том
+  забирается клиентом из командной строки.</p>
+</main>
+<script>
+(function () {
+  var id = location.pathname.replace(/^\/t\//, '').replace(/\/$/, '');
+  // Фрагмент читаем здесь и только здесь: он не уходит ни в запрос, ни в
+  // логи, ни в Referer. Сервер эту страницу отдаёт одну и ту же для всех
+  // раздач — подставить ключ он физически не может.
+  var key = location.hash.slice(1);
+  var link = location.origin + '/t/' + id + (key ? '#' + key : '');
+
+  document.getElementById('install').textContent =
+    'curl -fsSL ' + location.origin + '/install.sh | sh';
+
+  if (key) {
+    document.getElementById('haskey').hidden = false;
+    document.getElementById('cmd').textContent = 'ferry get "' + link + '"';
+    document.getElementById('copy').onclick = function () {
+      var b = this;
+      navigator.clipboard.writeText('ferry get "' + link + '"').then(function () {
+        b.textContent = 'Скопировано';
+        setTimeout(function () { b.textContent = 'Скопировать команду'; }, 1500);
+      });
+    };
+  } else {
+    document.getElementById('nokey').hidden = false;
+  }
+
+  function human(n) {
+    var u = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'], i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n : n.toFixed(1)).toString().replace('.', ',') + ' ' + u[i];
+  }
+
+  // Эта ручка ничего не сжигает: ни использования, ни challenge. По ней
+  // ходят превью-боты мессенджеров, и это в порядке вещей.
+  fetch('/api/transfers/' + encodeURIComponent(id))
+    .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+    .then(function (m) {
+      document.getElementById('state').textContent =
+        m.state === 'active' ? 'отправитель на связи' : 'отправителя нет';
+      document.getElementById('m-id').textContent = id;
+      document.getElementById('m-size').textContent = human(m.total);
+      document.getElementById('m-chunks').textContent =
+        m.chunks + ' по ' + human(m.chunk_size);
+      document.getElementById('m-state').textContent =
+        (m.state === 'active' ? 'активна' : 'закрыта')
+        + (m.uses_left >= 0 ? ' · осталось использований: ' + m.uses_left : '')
+        + ' · получателей: ' + m.receivers;
+      document.getElementById('meta').hidden = false;
+    })
+    .catch(function () {
+      document.getElementById('state').textContent =
+        'такой раздачи на сервере нет — её закрыли или сервер перезапускали';
+    });
+})();
+</script>
+</body>
+</html>
