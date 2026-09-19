@@ -1,0 +1,31 @@
+# Контекст сборки — КОРЕНЬ репозитория, а не Server/: образ собирает и
+# сервер, и общее ядро, и CLI-клиент, который потом раздаётся через
+# /install.sh. Поэтому и этот файл лежит здесь.
+
+# Артефакты сборки
+build/
+out/
+Server/build/
+
+# История и документация в образ не кладём
+.git/
+docs/
+
+# IDE и локальные настройки
+.vs/
+.claude/
+*.user
+CMakePresets.json
+CMakeUserPresets.json
+
+# Сам докер-контекст
+Server/Dockerfile
+.dockerignore
+Server/docker-compose.yml
+
+# У прокси свой контекст сборки (Server/proxy/)
+Server/proxy/
+Server/tools/
+
+# Том с конфигом сервера: монтируется снаружи, в образ не попадает
+Server/mount/

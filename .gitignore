@@ -1,0 +1,21 @@
+# Артефакты сборки
+build/
+build-*/
+out/
+Server/build/
+
+# Настройки конкретной установки: домен, почта, порты.
+Server/.env
+
+# Конфиг конкретного релея. В репозитории лежит ferry.conf.example —
+# update.sh копирует его сюда при первом запуске.
+Server/mount/ferry.conf
+
+# Клиент, собранный внутри образа и разложенный в веб-корень.
+Server/web/dl/
+
+# IDE
+.vs/
+*.user
+CMakeUserPresets.json
+docs
