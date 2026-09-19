@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry · S1 — пустой экран</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/ferry.css">
+</head>
+<body>
+
+<div class="f-proto" data-proto></div>
+
+<main class="f-page" data-screen>
+  <div class="f-page__inner">
+    <div class="f-sheet">
+
+      <header class="f-sheet__head">
+        <div class="f-brand">
+          <span class="f-brand__name">Ferry</span>
+          <span class="f-brand__sub">паром для файлов</span>
+        </div>
+        <span class="f-grow"></span>
+        <div class="f-stamp">
+          <span class="f-stamp__word">свободен</span>
+          <span class="f-stamp__sub">груза нет</span>
+        </div>
+      </header>
+
+      <div class="f-drop" id="drop">
+        <div class="f-stack" style="align-items: center; gap: var(--space-2);">
+          <h1 class="f-drop__title" style="margin: 0;">Перетащите сюда файл или папку</h1>
+          <p class="f-caption" style="margin: 0;">до 1 ТиБ в одной раздаче · папка равноправна файлу</p>
+        </div>
+        <div class="f-row">
+          <button type="button" class="f-btn f-btn--lg f-btn--primary">Выбрать файлы</button>
+          <button type="button" class="f-btn f-btn--lg f-btn--secondary">Выбрать папку</button>
+        </div>
+        <p class="f-caption" style="margin: 0; max-width: 56ch;">
+          Всё шифруется на вашем устройстве. Сервер видит только шифротекст и не пишет на диск ничего — ни файла, ни имени файла.
+        </p>
+      </div>
+
+      <section class="f-section">
+        <div class="f-section__head">
+          <span class="f-section__num">01</span>
+          <h2 class="f-section__name">что обещает паром</h2>
+          <span class="f-section__rule"></span>
+        </div>
+        <div class="f-grid3">
+          <div class="f-facts">
+            <div class="f-fact"><span class="f-fact__k">сервер хранит</span><span class="f-fact__dots"></span><span class="f-fact__v">ничего</span></div>
+            <p class="f-caption" style="margin: var(--space-2) 0 0;">В оперативной памяти живут идентификатор раздачи, сокеты и скользящее окно байтов. Перезапуск сервера — и раздачи больше нет.</p>
+          </div>
+          <div class="f-facts">
+            <div class="f-fact"><span class="f-fact__k">вы отдаёте байт</span><span class="f-fact__dots"></span><span class="f-fact__v">один раз</span></div>
+            <p class="f-caption" style="margin: var(--space-2) 0 0;">Сколько бы человек ни качало и когда бы они ни подключились. Тот, кто скачал целиком, помогает раздавать остальным.</p>
+          </div>
+          <div class="f-facts">
+            <div class="f-fact"><span class="f-fact__k">регистрация</span><span class="f-fact__dots"></span><span class="f-fact__v">не нужна</span></div>
+            <p class="f-caption" style="margin: var(--space-2) 0 0;">Ни почты, ни телефона, ни логина. Владение раздачей — это владение случайным токеном в памяти вкладки.</p>
+          </div>
+        </div>
+      </section>
+
+      <footer class="f-sheet__foot">
+        <p class="f-caption" style="margin: 0;">
+          Ferry — не файлообменник и не торрент. Пришёл, перевёз, ушёл; на берегу ничего не осталось.
+        </p>
+        <span class="f-grow"></span>
+        <a class="f-caption" href="../index.html">все экраны макета</a>
+      </footer>
+
+    </div>
+  </div>
+</main>
+
+<script src="../assets/fixtures.js"></script>
+<script src="../assets/ferry.js"></script>
+<script>
+(function () {
+  Ferry.screen({ title: 'S1 · пустой экран', tickMs: 0, build: function () { return {}; } });
+
+  /* перетаскивание: макет только подсвечивает зону, файлы не читаются */
+  var drop = document.getElementById('drop');
+  ['dragenter', 'dragover'].forEach(function (e) {
+    drop.addEventListener(e, function (ev) { ev.preventDefault(); drop.classList.add('is-over'); });
+  });
+  ['dragleave', 'drop'].forEach(function (e) {
+    drop.addEventListener(e, function (ev) { ev.preventDefault(); drop.classList.remove('is-over'); });
+  });
+})();
+</script>
+</body>
+</html>

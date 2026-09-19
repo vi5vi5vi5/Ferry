@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry · S5 — уход владельца</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/ferry.css">
+</head>
+<body>
+
+<div class="f-proto" data-proto></div>
+
+<main class="f-page" data-screen>
+  <div class="f-page__inner">
+    <div class="f-sheet">
+
+      <header class="f-sheet__head">
+        <div class="f-brand">
+          <span class="f-brand__name">Ferry</span>
+          <span class="f-brand__sub">накладная раздачи</span>
+        </div>
+        <span class="f-grow"></span>
+        <div class="f-id">
+          <span class="f-id__label">идентификатор</span>
+          <span class="f-id__value" data-f="id"></span>
+        </div>
+        <div class="f-stamp f-stamp--signal">
+          <span class="f-stamp__word">раздача идёт</span>
+          <span class="f-stamp__sub">вкладку закрывают</span>
+        </div>
+      </header>
+
+      <section class="f-section">
+        <div class="f-section__head">
+          <span class="f-section__num">01</span>
+          <h2 class="f-section__name">карта тома</h2>
+          <span class="f-section__rule"></span>
+        </div>
+        <div class="f-vmap" data-vmap="map">
+          <div class="f-vmap__cursors"></div>
+          <div class="f-vmap__frame"></div>
+          <div class="f-vmap__ruler">
+            <span>0</span><span>1,8 ГиБ</span><span>3,5 ГиБ</span><span>5,3 ГиБ</span>
+            <span>7,1 ГиБ</span><span>8,9 ГиБ</span><span>10,6 ГиБ</span><span>12,4 ГиБ</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="f-section f-section--grow">
+        <div class="f-section__head">
+          <span class="f-section__num">02</span>
+          <h2 class="f-section__name">получатели</h2>
+          <span class="f-section__rule"></span>
+        </div>
+        <div class="f-table">
+          <div data-list="receivers">
+            <template>
+              <div class="f-trow">
+                <span class="f-col--name" data-f="name"></span>
+                <div class="f-bar"><i class="f-bar__fill" data-class="fillClass" data-style="width:w1"></i></div>
+                <span class="f-col--pct" data-f="pct"></span>
+                <span class="f-col--role f-role" data-class="roleClass"><i></i><span data-f="role"></span></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </section>
+
+      <footer class="f-sheet__foot">
+        <div class="f-num">осталось 3 <span class="f-u">использования</span> · истекает через 71 <span class="f-u">мин</span></div>
+        <span class="f-grow"></span>
+        <button type="button" class="f-btn f-btn--danger">Закрыть доступ</button>
+      </footer>
+
+    </div>
+  </div>
+</main>
+
+<div class="f-modal" data-if="open" role="dialog" aria-modal="true" aria-labelledby="s5-title">
+  <div class="f-modal__sheet">
+    <div class="f-row">
+      <h1 class="f-modal__title" id="s5-title" style="margin: 0;" data-f="title"></h1>
+      <span class="f-grow"></span>
+      <div class="f-stamp" data-class="stampClass">
+        <span class="f-stamp__word" data-f="stampWord"></span>
+        <span class="f-stamp__sub">при закрытии вкладки</span>
+      </div>
+    </div>
+
+    <p class="f-note" data-class="noteClass" style="margin: 0;">
+      <span class="f-note__text" data-f="text"></span>
+    </p>
+
+    <div class="f-facts">
+      <div class="f-fact"><span class="f-fact__k">качают сейчас</span><span class="f-fact__dots"></span><span class="f-fact__v">2 человека</span></div>
+      <div class="f-fact"><span class="f-fact__k">скачали целиком</span><span class="f-fact__dots"></span><span class="f-fact__v" data-f="seeds"></span></div>
+      <div class="f-fact"><span class="f-fact__k">после ухода</span><span class="f-fact__dots"></span><span class="f-fact__v" data-class="afterClass" data-f="after"></span></div>
+    </div>
+
+    <div class="f-field" data-if="delegated">
+      <span class="f-field__label">ссылка, чтобы вернуть управление</span>
+      <div class="f-row" style="gap: var(--space-2);">
+        <input class="f-input" readonly value="https://ferry.example/t/n7Qk2pLm0vXsR7dTnWcAqB/own#Lw8pQ2vR5nT7xB1mB4zY">
+        <button type="button" class="f-btn f-btn--primary">Скопировать</button>
+      </div>
+      <span class="f-caption">Это единственный способ вернуться: токен владельца живёт в памяти этой вкладки и нигде больше не записан. Потеряете — раздача доживёт сама и погаснет.</span>
+    </div>
+
+    <div class="f-row">
+      <button type="button" class="f-btn f-btn--lg f-btn--secondary" data-close>Остаться на вкладке</button>
+      <button type="button" class="f-btn f-btn--lg" data-class="leaveClass" data-close data-f="leaveLabel"></button>
+    </div>
+  </div>
+</div>
+
+<script src="../assets/fixtures.js"></script>
+<script src="../assets/ferry.js"></script>
+<script>
+(function () {
+  var V = FerryData.VOLUME, css = Ferry.fmt.css, pct = Ferry.fmt.pct;
+  var open = true;
+
+  function common(t) {
+    var w = (t % 10) * 0.004;
+    return {
+      id: V.id, open: open,
+      map: {
+        segments: Ferry.map([[0, 0.78 + w, 'have'], [0.78 + w, 0.84 + w, 'inflight'], [0, 0.34, 'peer']]),
+        cursors: [{ x: css(0.44), name: 'Марк', catching: true }, { x: css(0.80 + w), name: 'Костя' }]
+      },
+      receivers: [
+        { name: 'Лена', w1: '100%', fillClass: 'f-bar__fill--peer', pct: '100 %', role: 'раздаёт другим', roleClass: 'f-role--seed' },
+        { name: 'Костя', w1: css(0.80 + w), fillClass: '', pct: pct(0.80 + w), role: 'качает', roleClass: 'f-role--leech' },
+        { name: 'Марк', w1: css(0.44), fillClass: 'f-bar__fill--peer', pct: '44 %', role: 'догоняет', roleClass: 'f-role--catching' }
+      ]
+    };
+  }
+
+  function delegated(t) {
+    var m = common(t);
+    m.title = 'Раздача продолжится без вас';
+    m.stampWord = 'делегируется';
+    m.stampClass = 'f-stamp--wait';
+    m.noteClass = 'f-note--wait';
+    m.text = 'Лена скачала том целиком и остаётся на связи — байты пойдут от неё. Настройки при этом замораживаются: менять их будет некому.';
+    m.seeds = 'Лена';
+    m.after = 'живёт, пока Лена на связи';
+    m.afterClass = '';
+    m.delegated = true;
+    m.leaveLabel = 'Уйти и оставить раздачу';
+    m.leaveClass = 'f-btn--primary';
+    return m;
+  }
+
+  function closing(t) {
+    var m = common(t);
+    m.title = 'Раздача остановится';
+    m.stampWord = 'закроется';
+    m.stampClass = 'f-stamp--danger';
+    m.noteClass = 'f-note--danger';
+    m.text = 'Вы не включали «оставить раздачу работать без меня», поэтому с закрытием вкладки сессия умирает: Костя и Марк не докачают, а ссылка станет мёртвой навсегда.';
+    m.seeds = 'Лена';
+    m.after = 'два человека не докачают';
+    m.afterClass = 'f-fact__v--danger';
+    m.delegated = false;
+    m.leaveLabel = 'Всё равно закрыть';
+    m.leaveClass = 'f-btn--danger';
+    return m;
+  }
+
+  var screen = Ferry.screen({
+    title: 'S5 · уход владельца',
+    scenarios: [
+      { key: 'deleg', label: 'оставить работать', build: delegated },
+      { key: 'close', label: 'закрыть раздачу', build: closing }
+    ]
+  });
+
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('[data-close]')) return;
+    open = false;
+    screen.rerender();
+  });
+})();
+</script>
+</body>
+</html>

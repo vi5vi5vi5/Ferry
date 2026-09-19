@@ -1,0 +1,151 @@
+/* Ferry · токены дизайн-системы.
+   Сгенерировано из project/tokens.json дизайн-системы Ferry — правьте там, не здесь.
+   Светлая тема по умолчанию; тёмная включается атрибутом data-theme="dark"
+   на <html> или системной настройкой. */
+
+:root {
+  --surface-000: #e9edf0;
+  --surface-100: #ffffff;
+  --surface-200: #f4f7f8;
+  --surface-300: #e0e6ea;
+  --line-100: #dde3e7;
+  --line-200: #74858f;
+  --ink-100: #0f1a22;
+  --ink-200: #3d4f5c;
+  --ink-300: #586a76;
+  --ink-on-signal: #16181a;
+  --ink-on-danger: #fff2f0;
+  --signal: #e05a12;
+  --signal-muted: #fbe4d5;
+  --signal-text: #a44207;
+  --seed: #0f7a6c;
+  --seed-muted: #d9f0eb;
+  --seed-text: #0a6357;
+  --ok: #17794a;
+  --ok-text: #14673f;
+  --warn: #b07407;
+  --warn-text: #8a5a04;
+  --danger: #b8281f;
+  --danger-text: #b02017;
+  --wait: #64798a;
+  --chunk-none: #d5dde2;
+  --chunk-inflight: #9fb2bd;
+  --chunk-have: #526b79;
+  --chunk-peer: #08544c;
+  --chunk-sender: #dd651c;
+  --focus: #0a63c2;
+  --overlay: rgba(15, 26, 34, 0.42);
+  --qr-ground: #ffffff;
+  --qr-ink: #0b1015;
+
+  --space-0.5: 2px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --radius-0: 0;
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --radius-full: 999px;
+  --shadow-raised: 0 1px 2px rgba(15, 26, 34, 0.12);
+  --shadow-modal: 0 16px 40px rgba(15, 26, 34, 0.18);
+  --hairline: 1px;
+  --track-sm: 6px;
+  --track-md: 10px;
+  --track-lg: 18px;
+  --chunk-min-w: 3px;
+  --cursor-w: 2px;
+  --focus-ring: 2px;
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+  --text-display-l: 600 44px/46px var(--font-sans);
+  --text-display-m: 600 28px/34px var(--font-sans);
+  --text-heading: 600 19px/26px var(--font-sans);
+  --text-body: 400 15px/22px var(--font-sans);
+  --text-body-strong: 600 15px/22px var(--font-sans);
+  --text-caption: 400 13px/18px var(--font-sans);
+  --text-label: 600 12px/16px var(--font-sans);
+  --text-mono-l: 500 20px/28px var(--font-mono);
+  --text-mono-num: 500 15px/20px var(--font-mono);
+  --text-mono-m: 400 14px/20px var(--font-mono);
+  --text-mono-s: 400 12px/16px var(--font-mono);
+}
+
+:root[data-theme="dark"] {
+  --surface-000: #0b1015;
+  --surface-100: #121a21;
+  --surface-200: #19242d;
+  --surface-300: #22303a;
+  --line-100: #263440;
+  --line-200: #5a7181;
+  --ink-100: #e8eef2;
+  --ink-200: #a8b7c2;
+  --ink-300: #7e93a2;
+  --ink-on-signal: #16181a;
+  --ink-on-danger: #fff2f0;
+  --signal: #ff6a1f;
+  --signal-muted: #3a2415;
+  --signal-text: #ff8c47;
+  --seed: #35b3a0;
+  --seed-muted: #12302e;
+  --seed-text: #5ecdbb;
+  --ok: #3fae6a;
+  --ok-text: #62c98a;
+  --warn: #e5a32a;
+  --warn-text: #f0b95a;
+  --danger: #c8332e;
+  --danger-text: #ff8a80;
+  --wait: #6f8697;
+  --chunk-none: #1b2730;
+  --chunk-inflight: #3d505c;
+  --chunk-have: #5a7382;
+  --chunk-peer: #2ba192;
+  --chunk-sender: #ff9a52;
+  --focus: #6db9ff;
+  --overlay: rgba(4, 8, 11, 0.74);
+  --qr-ground: #ffffff;
+  --qr-ink: #0b1015;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface-000: #0b1015;
+    --surface-100: #121a21;
+    --surface-200: #19242d;
+    --surface-300: #22303a;
+    --line-100: #263440;
+    --line-200: #5a7181;
+    --ink-100: #e8eef2;
+    --ink-200: #a8b7c2;
+    --ink-300: #7e93a2;
+    --ink-on-signal: #16181a;
+    --ink-on-danger: #fff2f0;
+    --signal: #ff6a1f;
+    --signal-muted: #3a2415;
+    --signal-text: #ff8c47;
+    --seed: #35b3a0;
+    --seed-muted: #12302e;
+    --seed-text: #5ecdbb;
+    --ok: #3fae6a;
+    --ok-text: #62c98a;
+    --warn: #e5a32a;
+    --warn-text: #f0b95a;
+    --danger: #c8332e;
+    --danger-text: #ff8a80;
+    --wait: #6f8697;
+    --chunk-none: #1b2730;
+    --chunk-inflight: #3d505c;
+    --chunk-have: #5a7382;
+    --chunk-peer: #2ba192;
+    --chunk-sender: #ff9a52;
+    --focus: #6db9ff;
+    --overlay: rgba(4, 8, 11, 0.74);
+    --qr-ground: #ffffff;
+    --qr-ink: #0b1015;
+  }
+}

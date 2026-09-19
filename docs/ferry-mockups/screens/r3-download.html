@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry · R3 — приём тома</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/ferry.css">
+</head>
+<body>
+
+<div class="f-proto" data-proto></div>
+
+<main class="f-page" data-screen>
+  <div class="f-page__inner">
+    <div class="f-sheet">
+
+      <header class="f-sheet__head">
+        <div class="f-brand">
+          <span class="f-brand__name">Ferry</span>
+          <span class="f-brand__sub">квитанция приёма</span>
+        </div>
+        <span class="f-grow"></span>
+        <div class="f-id">
+          <span class="f-id__label">раздача</span>
+          <span class="f-id__value" data-f="id"></span>
+        </div>
+        <div class="f-stamp" data-class="stampClass">
+          <span class="f-stamp__word" data-f="state"></span>
+          <span class="f-stamp__sub" data-f="stampSub"></span>
+        </div>
+      </header>
+
+      <div class="f-note f-note--warn" data-if="warn">
+        <span class="f-note__text" data-f="warnText"></span>
+        <span class="f-grow"></span>
+        <button type="button" class="f-btn f-btn--sm f-btn--secondary" data-f="warnAction"></button>
+      </div>
+
+      <div class="f-grid2">
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">01</span>
+            <h2 class="f-section__name">том</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <div class="f-facts" data-list="volRows">
+            <template>
+              <div class="f-fact">
+                <span class="f-fact__k" data-f="k"></span>
+                <span class="f-fact__dots"></span>
+                <span class="f-fact__v" data-f="v"></span>
+              </div>
+            </template>
+          </div>
+        </section>
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">02</span>
+            <h2 class="f-section__name">ход приёма</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <div class="f-row" style="align-items: baseline;">
+            <div class="f-big">
+              <span class="f-big__value" data-f="rate"></span>
+              <span class="f-big__unit">МБ/с</span>
+            </div>
+            <span class="f-grow"></span>
+            <span style="font: var(--text-mono-l);" data-f="pct"></span>
+          </div>
+          <div class="f-facts" data-list="sources" style="margin-top: var(--space-2);">
+            <template>
+              <div class="f-fact">
+                <i style="width: 10px; height: 10px; flex-shrink: 0;" data-style="background:color"></i>
+                <span class="f-fact__k" data-f="name"></span>
+                <span class="f-fact__dots"></span>
+                <span class="f-fact__v" data-f="value"></span>
+              </div>
+            </template>
+          </div>
+        </section>
+
+      </div>
+
+      <section class="f-section">
+        <div class="f-section__head">
+          <span class="f-section__num">03</span>
+          <h2 class="f-section__name">волны</h2>
+          <span class="f-section__rule"></span>
+          <span class="f-section__meta" data-f="waveNote"></span>
+        </div>
+        <div class="f-wave">
+          <span class="f-wave__label">волна 1 · хвост</span>
+          <div class="f-wave__track">
+            <i class="f-wave__fill" data-style="left:wave1x;width:wave1w"></i>
+          </div>
+          <span class="f-wave__value" data-f="wave1"></span>
+        </div>
+        <div class="f-wave" data-if="twoWaves">
+          <span class="f-wave__label f-wave__label--seed">волна 2 · начало</span>
+          <div class="f-wave__track">
+            <i class="f-wave__fill f-wave__fill--seed" data-style="width:wave2w"></i>
+          </div>
+          <span class="f-wave__value" data-f="wave2"></span>
+        </div>
+        <p class="f-caption" style="margin: 0;" data-f="waveText"></p>
+      </section>
+
+      <section class="f-section">
+        <div class="f-section__head">
+          <span class="f-section__num">04</span>
+          <h2 class="f-section__name">карта тома</h2>
+          <span class="f-section__rule"></span>
+          <span class="f-section__meta" data-f="mapNote"></span>
+        </div>
+        <div class="f-vmap" data-vmap="map">
+          <div class="f-vmap__frame"></div>
+          <div class="f-vmap__ruler">
+            <span>0</span><span>1,8 ГиБ</span><span>3,5 ГиБ</span><span>5,3 ГиБ</span>
+            <span>7,1 ГиБ</span><span>8,9 ГиБ</span><span>10,6 ГиБ</span><span>12,4 ГиБ</span>
+          </div>
+          <div class="f-legend">
+            <span><i style="background: var(--chunk-none)"></i>нет</span>
+            <span><i style="background: var(--chunk-inflight)"></i>в пути</span>
+            <span><i style="background: var(--chunk-have)"></i>есть</span>
+            <span><i style="background: var(--chunk-peer)"></i>от пира</span>
+            <span><i style="background: var(--chunk-sender)"></i>от отправителя</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="f-section f-section--grow">
+        <div class="f-section__head">
+          <span class="f-section__num">05</span>
+          <h2 class="f-section__name">место выгрузки</h2>
+          <span class="f-section__rule"></span>
+        </div>
+        <div class="f-facts">
+          <div class="f-fact"><span class="f-fact__k">путь</span><span class="f-fact__dots"></span><span class="f-fact__v" data-f="path"></span></div>
+          <div class="f-fact"><span class="f-fact__k">режим записи</span><span class="f-fact__dots"></span><span class="f-fact__v" data-class="modeClass" data-f="mode"></span></div>
+          <div class="f-fact"><span class="f-fact__k">проверено чанков</span><span class="f-fact__dots"></span><span class="f-fact__v f-fact__v--ok" data-f="verified"></span></div>
+        </div>
+      </section>
+
+      <footer class="f-sheet__foot">
+        <p class="f-caption" style="margin: 0; max-width: 72ch;">
+          Не закрывайте вкладку: приём идёт в ней. Каждый чанк проверяется BLAKE3 сразу по приходу, и при обрыве принятое не теряется — продолжим с того же места.
+        </p>
+        <span class="f-grow"></span>
+        <button type="button" class="f-btn f-btn--secondary">Остановить приём</button>
+      </footer>
+
+    </div>
+  </div>
+</main>
+
+<script src="../assets/fixtures.js"></script>
+<script src="../assets/ferry.js"></script>
+<script>
+(function () {
+  var V = FerryData.VOLUME, css = Ferry.fmt.css, pct = Ferry.fmt.pct, int = Ferry.fmt.int;
+
+  function src(buf, peer, sender) {
+    return [
+      { name: 'из буфера сервера', value: buf, color: 'var(--chunk-have)' },
+      { name: 'от других получателей', value: peer, color: 'var(--chunk-peer)' },
+      { name: 'от отправителя', value: sender, color: 'var(--chunk-sender)' }
+    ];
+  }
+
+  function build(scen, t) {
+    var w = (t % 10) * 0.004;
+    var m = {
+      id: V.id,
+      state: 'в пути', stampClass: 'f-stamp--signal',
+      warn: false,
+      path: '~/Downloads/sirius-raw-2026-09/',
+      mode: 'прямая запись на диск · сидирование доступно',
+      modeClass: ''
+    };
+    var done = 0, tail = [0, 0], two = false;
+
+    if (scen === 'waves') {
+      m.stampSub = 'две волны'; m.rate = '96,2';
+      done = 0.30; tail = [0.60, 0.84 + w]; two = true;
+      m.map = { segments: Ferry.map([[0, 0.30, 'peer'], [0.30, 0.34, 'inflight'], [0.60, 0.84 + w, 'have'], [0.84 + w, 0.88 + w, 'inflight']]) };
+      m.sources = src('64 %', '29 %', '7 %');
+      m.waveNote = 'вход на 60 % тома';
+      m.waveText = 'Хвост идёт вместе со всеми — эти чанки и так летят в окне, сервер за ними никуда не ходит. Начало добирается параллельно от тех, кто уже скачал. Это не сломанный прогресс.';
+      m.mapNote = 'две волны идут навстречу друг другу';
+      m.eta = '3 мин 04 с';
+    }
+
+    if (scen === 'seq') {
+      m.stampSub = 'одна волна'; m.rate = '112,4';
+      done = 0; tail = [0, 0.78 + w]; two = false;
+      m.map = { segments: Ferry.map([[0, 0.78 + w, 'have'], [0.78 + w, 0.83 + w, 'inflight']]) };
+      m.sources = src('100 %', '0 %', '0 %');
+      m.waveNote = 'догон по порядку';
+      m.waveText = 'Пропущенный кусок оказался мал относительно оставшегося хвоста, поэтому клиент догоняет последовательно и сливается с группой. Второй дорожки нет вовсе — её отсутствие тоже информация.';
+      m.mapNote = 'одна волна, слева направо';
+      m.eta = '1 мин 46 с';
+    }
+
+    if (scen === 'nospace') {
+      m.stampSub = 'последовательный режим'; m.stampClass = 'f-stamp--warn'; m.rate = '84,0';
+      done = 0; tail = [0, 0.46 + w]; two = false;
+      m.map = { segments: Ferry.map([[0, 0.46 + w, 'have'], [0.46 + w, 0.50 + w, 'inflight']]) };
+      m.sources = src('100 %', '0 %', '0 %');
+      m.waveNote = 'две волны недоступны';
+      m.waveText = 'Байты уходят прямо в менеджер загрузок, читать их обратно вкладка не может: ни второй волны, ни раздачи другим. Это ограничение браузера, а не настройка.';
+      m.mapNote = 'только по порядку';
+      m.eta = '4 мин 22 с';
+      m.warn = true;
+      m.warnText = 'Свободного места меньше, чем 1,2 × размер тома: включён последовательный режим.';
+      m.warnAction = 'Выбрать другой диск';
+      m.path = 'менеджер загрузок браузера';
+      m.mode = 'последовательный поток · раздавать другим не получится';
+      m.modeClass = 'f-fact__v--warn';
+    }
+
+    var total = (tail[1] - tail[0]) + done;
+    m.pct = pct(total);
+    m.wave1 = pct(tail[1] - tail[0]); m.wave1x = css(tail[0]); m.wave1w = css(tail[1] - tail[0]);
+    m.wave2 = pct(done); m.wave2w = css(done); m.twoWaves = two;
+    m.verified = int(total * V.chunks) + ' из ' + V.chunksHuman;
+    m.volRows = [
+      { k: 'имя тома', v: V.name },
+      { k: 'размер', v: V.bytesHuman + ' байт' },
+      { k: 'чанк', v: V.chunkSize + ' · ' + V.chunksHuman + ' шт' },
+      { k: 'осталось', v: m.eta }
+    ];
+    return m;
+  }
+
+  Ferry.screen({
+    title: 'R3 · приём тома',
+    scenarios: [
+      { key: 'waves', label: 'две волны', build: function (t) { return build('waves', t); } },
+      { key: 'seq', label: 'догон по порядку', build: function (t) { return build('seq', t); } },
+      { key: 'nospace', label: 'мало места', build: function (t) { return build('nospace', t); } }
+    ]
+  });
+})();
+</script>
+</body>
+</html>

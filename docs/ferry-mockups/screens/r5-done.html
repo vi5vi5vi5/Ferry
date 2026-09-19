@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry · R5 — готово</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/ferry.css">
+</head>
+<body>
+
+<div class="f-proto" data-proto></div>
+
+<main class="f-page" data-screen>
+  <div class="f-page__inner">
+    <div class="f-sheet">
+
+      <header class="f-sheet__head">
+        <div class="f-brand">
+          <span class="f-brand__name">Ferry</span>
+          <span class="f-brand__sub">отметка о доставке</span>
+        </div>
+        <span class="f-grow"></span>
+        <div class="f-stamp f-stamp--ok">
+          <span class="f-stamp__word">доставлено</span>
+          <span class="f-stamp__sub" data-f="stampSub"></span>
+        </div>
+      </header>
+
+      <div class="f-grid2">
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">01</span>
+            <h2 class="f-section__name">что принято</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <p style="font: var(--text-display-m); margin: var(--space-1) 0;" data-f="title"></p>
+          <div class="f-facts" data-list="rows">
+            <template>
+              <div class="f-fact">
+                <span class="f-fact__k" data-f="k"></span>
+                <span class="f-fact__dots"></span>
+                <span class="f-fact__v" data-f="v"></span>
+              </div>
+            </template>
+          </div>
+        </section>
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">02</span>
+            <h2 class="f-section__name">целостность</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <div class="f-row" style="align-items: flex-start; gap: var(--space-3); margin: var(--space-2) 0;">
+            <svg width="40" height="40" viewBox="0 0 40 40" aria-hidden="true" style="flex-shrink: 0;">
+              <circle cx="20" cy="20" r="18" fill="none" stroke="var(--ok)" stroke-width="1.5"></circle>
+              <path d="M 12 20.5 L 17.5 26 L 28 14" fill="none" stroke="var(--ok)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+            <p style="margin: 0;">Проверено BLAKE3 — целостность подтверждена. Каждый чанк сверен с зашифрованным списком хешей ещё в момент приёма, root сошёлся.</p>
+          </div>
+          <div class="f-facts">
+            <div class="f-fact"><span class="f-fact__k">алгоритм</span><span class="f-fact__dots"></span><span class="f-fact__v">BLAKE3</span></div>
+            <div class="f-fact"><span class="f-fact__k">сверено чанков</span><span class="f-fact__dots"></span><span class="f-fact__v f-fact__v--ok">3 174 из 3 174</span></div>
+            <div class="f-fact"><span class="f-fact__k">root</span><span class="f-fact__dots"></span><span class="f-fact__v">b3:7f4c…a19d</span></div>
+          </div>
+        </section>
+
+      </div>
+
+      <section class="f-section f-section--grow">
+        <div class="f-section__head">
+          <span class="f-section__num">03</span>
+          <h2 class="f-section__name">обратный рейс</h2>
+          <span class="f-section__rule"></span>
+        </div>
+        <div class="f-note" data-class="seedNote">
+          <div class="f-check f-check--seed" data-class="seedDisabled">
+            <input type="checkbox" id="seed" data-toggle="seeding">
+            <label for="seed">
+              <span class="f-check__title">остаться и помогать раздавать</span>
+              <span class="f-caption" data-f="seedText"></span>
+            </label>
+          </div>
+          <span class="f-grow"></span>
+          <span class="f-num" data-if="seeding">отдано 3,1 <span class="f-u">ГиБ · двум получателям</span></span>
+        </div>
+      </section>
+
+      <footer class="f-sheet__foot">
+        <button type="button" class="f-btn f-btn--lg f-btn--primary" data-f="cta"></button>
+        <button type="button" class="f-btn f-btn--lg f-btn--secondary">Закрыть вкладку</button>
+        <span class="f-grow"></span>
+        <span class="f-caption" data-f="tail"></span>
+      </footer>
+
+    </div>
+  </div>
+</main>
+
+<script src="../assets/fixtures.js"></script>
+<script src="../assets/ferry.js"></script>
+<script>
+(function () {
+  var V = FerryData.VOLUME;
+  var ui = { seeding: true };
+
+  function base(o) {
+    var can = o.canSeed;
+    return {
+      stampSub: o.stampSub,
+      title: o.title,
+      rows: o.rows,
+      seeding: can && ui.seeding,
+      seedText: o.seedText,
+      seedNote: (can && ui.seeding) ? 'f-note--ok' : '',
+      seedDisabled: can ? '' : 'is-disabled',
+      cta: o.cta,
+      tail: o.tail
+    };
+  }
+
+  function seed() {
+    return base({
+      stampSub: 'папка на диске', title: V.name + '/', canSeed: true,
+      rows: [
+        { k: 'куда легло', v: '~/Downloads/sirius-raw-2026-09/' },
+        { k: 'размер', v: V.bytesHuman + ' байт' },
+        { k: 'время приёма', v: '7 мин 12 с · 96,2 МБ/с' },
+        { k: 'источники', v: 'буфер 64 % · пиры 29 % · отправитель 7 %' }
+      ],
+      seedText: 'Вы скачали том целиком — оставшись на вкладке, вы отдаёте начало тем, кто подключился позже. Отправителю это не стоит ничего.',
+      cta: 'Открыть папку',
+      tail: 'раздача живёт, пока на связи хоть один такой получатель'
+    });
+  }
+
+  function zip() {
+    return base({
+      stampSub: 'архив собран', title: V.name + '.zip', canSeed: true,
+      rows: [
+        { k: 'куда легло', v: '~/Downloads/sirius-raw-2026-09.zip' },
+        { k: 'формат', v: 'ZIP без сжатия (store, zip64)' },
+        { k: 'файлов внутри', v: V.filesHuman },
+        { k: 'время приёма', v: '9 мин 48 с · 71,4 МБ/с' }
+      ],
+      seedText: 'Браузер не умеет писать папку напрямую, поэтому дерево собрано в архив — но чанки читаются из приватного хранилища, и раздавать вы можете.',
+      cta: 'Показать в загрузках',
+      tail: 'распакуйте архив там, где он должен лежать'
+    });
+  }
+
+  function noseed() {
+    return base({
+      stampSub: 'файл сохранён', title: V.name + '.mkv', canSeed: false,
+      rows: [
+        { k: 'куда легло', v: 'менеджер загрузок браузера' },
+        { k: 'размер', v: V.bytesHuman + ' байт' },
+        { k: 'время приёма', v: '12 мин 05 с · 58,0 МБ/с' },
+        { k: 'источники', v: 'буфер 100 %' }
+      ],
+      seedText: 'Приём шёл потоком — байты ушли в менеджер загрузок, и прочитать их обратно из вкладки нельзя. Раздавать другим не получится: это ограничение браузера, а не настройка.',
+      cta: 'Показать в загрузках',
+      tail: 'в десктопном клиенте такого ограничения нет'
+    });
+  }
+
+  var screen = Ferry.screen({
+    title: 'R5 · готово',
+    tickMs: 0,
+    scenarios: [
+      { key: 'seed', label: 'папка на диске', build: seed, live: false },
+      { key: 'zip', label: 'архив', build: zip, live: false },
+      { key: 'noseed', label: 'раздавать нельзя', build: noseed, live: false }
+    ],
+    after: function (model) {
+      var box = document.getElementById('seed');
+      box.checked = !!model.seeding;
+      box.disabled = model.seedDisabled === 'is-disabled';
+    }
+  });
+
+  document.addEventListener('change', function (e) {
+    if (!e.target.closest('[data-toggle]')) return;
+    ui.seeding = e.target.checked;
+    screen.rerender();
+  });
+})();
+</script>
+</body>
+</html>

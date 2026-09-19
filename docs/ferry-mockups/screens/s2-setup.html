@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry · S2 — настройка раздачи</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/ferry.css">
+</head>
+<body>
+
+<div class="f-proto" data-proto></div>
+
+<main class="f-page" data-screen>
+  <div class="f-page__inner">
+    <div class="f-sheet">
+
+      <header class="f-sheet__head">
+        <div class="f-brand">
+          <span class="f-brand__name">Ferry</span>
+          <span class="f-brand__sub">условия перевозки</span>
+        </div>
+        <span class="f-grow"></span>
+        <div class="f-stamp">
+          <span class="f-stamp__word">к отправке</span>
+          <span class="f-stamp__sub">раздача не начата</span>
+        </div>
+      </header>
+
+      <div class="f-grid2">
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">01</span>
+            <h2 class="f-section__name">груз</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <p style="font: var(--text-display-m); margin: var(--space-1) 0;" data-f="volName"></p>
+          <div class="f-facts" data-list="volRows">
+            <template>
+              <div class="f-fact">
+                <span class="f-fact__k" data-f="k"></span>
+                <span class="f-fact__dots"></span>
+                <span class="f-fact__v" data-f="v"></span>
+              </div>
+            </template>
+          </div>
+
+          <div class="f-section__head" style="margin-top: var(--space-3);">
+            <span class="f-section__num">02</span>
+            <h2 class="f-section__name">опись вложения</h2>
+            <span class="f-section__rule"></span>
+            <span class="f-section__meta">7 из 4 812</span>
+          </div>
+          <div class="f-tree" data-list="tree">
+            <template>
+              <div class="f-tree__row">
+                <span class="f-tree__mark" data-f="mark"></span>
+                <span class="f-tree__name" data-f="name"></span>
+                <span class="f-grow"></span>
+                <span class="f-fact__v" data-f="size"></span>
+              </div>
+            </template>
+          </div>
+          <p class="f-caption" style="margin: var(--space-2) 0 0;">Файлы идут в томе в лексикографическом порядке: любая папка оказывается непрерывным куском байт, и получатель сможет взять её одну.</p>
+        </section>
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">03</span>
+            <h2 class="f-section__name">условия выдачи</h2>
+            <span class="f-section__rule"></span>
+          </div>
+
+          <div class="f-stack" style="gap: var(--space-4);">
+
+            <div class="f-field">
+              <span class="f-field__label">сколько раз можно открыть</span>
+              <div class="f-seg">
+                <button type="button" data-set="uses:1">одноразовая</button>
+                <button type="button" data-set="uses:5">пять раз</button>
+                <button type="button" data-set="uses:inf">без лимита</button>
+              </div>
+              <span class="f-caption">Ссылку открыл тот, кто доказал владение ключом. Превью-бот мессенджера использование не сжигает.</span>
+            </div>
+
+            <div class="f-field">
+              <span class="f-field__label">срок жизни</span>
+              <div class="f-seg">
+                <button type="button" data-set="ttl:1h">1 час</button>
+                <button type="button" data-set="ttl:24h">24 часа</button>
+                <button type="button" data-set="ttl:7d">7 дней</button>
+              </div>
+              <span class="f-caption">Верхняя граница жизни раздачи, независимо от счётчика использований.</span>
+            </div>
+
+            <div class="f-check">
+              <input type="checkbox" id="approval" data-toggle="approval">
+              <label for="approval">
+                <span class="f-check__title">спрашивать меня перед выдачей</span>
+                <span class="f-caption">Каждого получателя вы пускаете вручную. Пока вас нет на связи, никто не войдёт.</span>
+              </label>
+            </div>
+
+            <div class="f-check">
+              <input type="checkbox" id="password" data-toggle="password">
+              <label for="password">
+                <span class="f-check__title">пароль вместо ключа в ссылке</span>
+                <span class="f-caption">Ссылку можно прислать в мессенджере, а пароль продиктовать голосом.</span>
+              </label>
+            </div>
+
+            <div class="f-field" data-if="password" style="padding-left: 30px;">
+              <label class="f-field__label" for="pw">парольная фраза</label>
+              <input class="f-input" id="pw" type="text" value="паром судовая накладная под дождём">
+              <span class="f-caption f-caption--warn">Этот режим слабее ключа в ссылке: ключ стоит ровно столько, сколько стоит пароль, и злой сервер может перебирать его офлайн. Нужна фраза от пяти слов — короткие не принимаются.</span>
+            </div>
+
+            <div class="f-check">
+              <input type="checkbox" id="leaveOpen" data-toggle="leaveOpen">
+              <label for="leaveOpen">
+                <span class="f-check__title">оставить раздачу работать без меня</span>
+                <span class="f-caption">После вашего ухода настройки уже нельзя будет изменить, а раздача проживёт, пока кто-то, скачавший целиком, остаётся на связи.</span>
+              </label>
+            </div>
+
+            <div class="f-field" data-if="askOnLeave" style="padding-left: 30px;">
+              <span class="f-field__label">что делать с подтверждением, когда вы уйдёте</span>
+              <div class="f-seg">
+                <button type="button" data-set="onLeave:close">закрыть раздачу</button>
+                <button type="button" data-set="onLeave:freeze">пускать всех с ключом</button>
+              </div>
+              <span class="f-caption">Подтверждать будет некому, поэтому решение принимается сейчас. Никакой сид не подтвердит доступ за вас.</span>
+            </div>
+
+          </div>
+        </section>
+
+      </div>
+
+      <section class="f-section">
+        <div class="f-section__head">
+          <span class="f-section__num">04</span>
+          <h2 class="f-section__name">как это будет выглядеть</h2>
+          <span class="f-section__rule"></span>
+        </div>
+        <div class="f-facts">
+          <div class="f-fact"><span class="f-fact__k">ссылка</span><span class="f-fact__dots"></span><span class="f-fact__v" data-f="linkPreview"></span></div>
+          <div class="f-fact"><span class="f-fact__k">условия</span><span class="f-fact__dots"></span><span class="f-fact__v" data-f="policyLine"></span></div>
+          <div class="f-fact"><span class="f-fact__k">после вашего ухода</span><span class="f-fact__dots"></span><span class="f-fact__v" data-class="leaveClass" data-f="leaveLine"></span></div>
+        </div>
+      </section>
+
+      <footer class="f-sheet__foot">
+        <button type="button" class="f-btn f-btn--lg f-btn--primary">Начать раздачу</button>
+        <button type="button" class="f-btn f-btn--lg f-btn--secondary">Выбрать другой груз</button>
+        <span class="f-grow"></span>
+        <span class="f-caption">Раздача идёт, пока открыта эта вкладка — объекты файлов живут в ней.</span>
+      </footer>
+
+    </div>
+  </div>
+</main>
+
+<script src="../assets/fixtures.js"></script>
+<script src="../assets/ferry.js"></script>
+<script>
+(function () {
+  var V = FerryData.VOLUME, L = FerryData.LINK;
+
+  /* состояние формы — ровно то, что уйдёт в offer.policy из §8 */
+  var ui = { uses: '1', ttl: '24h', approval: false, password: false, leaveOpen: true, onLeave: 'close' };
+
+  var USES = { '1': 'одноразовая ссылка', '5': 'пять использований', 'inf': 'без лимита' };
+  var TTL = { '1h': '1 час', '24h': '24 часа', '7d': '7 дней' };
+
+  function model() {
+    var parts = [USES[ui.uses], TTL[ui.ttl]];
+    if (ui.approval) parts.push('с подтверждением');
+    if (ui.password) parts.push('пароль вместо ключа');
+    return {
+      volName: V.name,
+      volRows: [
+        { k: 'вид', v: 'папка, ' + V.filesHuman + ' файлов' },
+        { k: 'размер', v: V.bytesHuman + ' байт' },
+        { k: 'в человеческом виде', v: V.size + ' ' + V.sizeUnit },
+        { k: 'чанк', v: V.chunkSize + ' · ' + V.chunksHuman + ' шт' }
+      ],
+      tree: FerryData.TREE,
+      password: ui.password,
+      askOnLeave: ui.approval && ui.leaveOpen,
+      linkPreview: ui.password ? L.base + ' + пароль отдельно' : L.base + '#…',
+      policyLine: parts.join(' · '),
+      leaveLine: ui.leaveOpen
+        ? (ui.approval && ui.onLeave === 'close'
+            ? 'раздача закроется: подтверждать некому'
+            : 'раздача живёт, пока на связи сид; настройки заморожены')
+        : 'раздача закроется сразу',
+      leaveClass: ui.leaveOpen ? '' : 'f-fact__v--warn'
+    };
+  }
+
+  var screen = Ferry.screen({
+    title: 'S2 · настройка раздачи',
+    tickMs: 0,
+    build: model,
+    after: function () {
+      document.querySelectorAll('[data-set]').forEach(function (b) {
+        var kv = b.getAttribute('data-set').split(':');
+        b.setAttribute('aria-pressed', String(ui[kv[0]] === kv[1]));
+      });
+      document.querySelectorAll('[data-toggle]').forEach(function (c) {
+        c.checked = !!ui[c.getAttribute('data-toggle')];
+      });
+    }
+  });
+
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-set]');
+    if (!b) return;
+    var kv = b.getAttribute('data-set').split(':');
+    ui[kv[0]] = kv[1];
+    screen.rerender();
+  });
+
+  document.addEventListener('change', function (e) {
+    var c = e.target.closest('[data-toggle]');
+    if (!c) return;
+    ui[c.getAttribute('data-toggle')] = c.checked;
+    screen.rerender();
+  });
+})();
+</script>
+</body>
+</html>

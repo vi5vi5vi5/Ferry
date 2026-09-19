@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry · R1 — превью тома</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/ferry.css">
+</head>
+<body>
+
+<div class="f-proto" data-proto></div>
+
+<main class="f-page" data-screen>
+  <div class="f-page__inner">
+    <div class="f-sheet">
+
+      <header class="f-sheet__head">
+        <div class="f-brand">
+          <span class="f-brand__name">Ferry</span>
+          <span class="f-brand__sub">груз к выдаче</span>
+        </div>
+        <span class="f-grow"></span>
+        <div class="f-stamp" data-class="stampClass">
+          <span class="f-stamp__word" data-f="state"></span>
+          <span class="f-stamp__sub" data-f="stampSub"></span>
+        </div>
+      </header>
+
+      <div class="f-grid2">
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">01</span>
+            <h2 class="f-section__name">том</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <p style="font: var(--text-display-m); margin: var(--space-1) 0;" data-f="volName"></p>
+          <div class="f-facts" data-list="volRows">
+            <template>
+              <div class="f-fact">
+                <span class="f-fact__k" data-f="k"></span>
+                <span class="f-fact__dots"></span>
+                <span class="f-fact__v" data-f="v"></span>
+              </div>
+            </template>
+          </div>
+          <p class="f-caption" style="margin: var(--space-3) 0 0;">
+            Имя и состав пришли в зашифрованном манифесте: сервер их не видел и увидеть не может. Расшифровал их ваш браузер ключом из ссылки.
+          </p>
+        </section>
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">02</span>
+            <h2 class="f-section__name">условия выдачи</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <div class="f-facts" data-list="facts">
+            <template>
+              <div class="f-fact">
+                <span class="f-fact__k" data-f="k"></span>
+                <span class="f-fact__dots"></span>
+                <span class="f-fact__v" data-class="cls" data-f="v"></span>
+              </div>
+            </template>
+          </div>
+
+          <div class="f-field" data-if="needPassword" style="margin-top: var(--space-4);">
+            <label class="f-field__label" for="pw">пароль от груза</label>
+            <input class="f-input" id="pw" type="password" value="паром судовая накладная">
+            <span class="f-caption f-caption--warn">
+              Парольный режим слабее ключа в ссылке: ключ стоит ровно столько, сколько стоит пароль, и его можно перебирать офлайн. Нужна фраза от пяти слов.
+            </span>
+          </div>
+
+          <div class="f-error" data-if="dead" style="margin-top: var(--space-4);">
+            <div class="f-row">
+              <h3 style="font: var(--text-heading); margin: 0;" data-f="deadTitle"></h3>
+              <span class="f-error__code" data-f="deadCode"></span>
+            </div>
+            <p class="f-error__text" style="margin: 0;" data-f="deadText"></p>
+          </div>
+        </section>
+
+      </div>
+
+      <section class="f-section f-section--grow">
+        <div class="f-section__head">
+          <span class="f-section__num">03</span>
+          <h2 class="f-section__name">опись вложения</h2>
+          <span class="f-section__rule"></span>
+          <span class="f-section__meta" data-f="treeNote"></span>
+        </div>
+        <div class="f-table">
+          <div class="f-thead">
+            <span class="f-col--num">№</span>
+            <span class="f-col--path">путь в томе</span>
+            <span class="f-col--size">размер</span>
+            <span class="f-col--offset">смещение</span>
+          </div>
+          <div data-list="rows">
+            <template>
+              <div class="f-trow f-trow--dense">
+                <span class="f-col--num" data-f="n"></span>
+                <span class="f-col--path" data-f="path"></span>
+                <span class="f-col--size" data-f="size"></span>
+                <span class="f-col--offset" data-f="offset"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </section>
+
+      <footer class="f-sheet__foot">
+        <button type="button" class="f-btn f-btn--lg f-btn--primary" data-class="ctaClass" data-f="cta"></button>
+        <button type="button" class="f-btn f-btn--lg f-btn--secondary" data-if="!dead">Выбрать часть тома</button>
+        <span class="f-grow"></span>
+        <span class="f-caption" data-f="ctaNote"></span>
+      </footer>
+
+    </div>
+  </div>
+</main>
+
+<script src="../assets/fixtures.js"></script>
+<script src="../assets/ferry.js"></script>
+<script>
+(function () {
+  var V = FerryData.VOLUME, M = FerryData.MANIFEST;
+
+  var SINGLE = [{ n: '0001', path: 'sirius-raw-2026-09.mkv', size: '12,4 ГиБ', offset: '0' }];
+
+  function volRows(kind) {
+    return [
+      { k: 'вид', v: kind },
+      { k: 'размер', v: V.bytesHuman + ' байт' },
+      { k: 'в человеческом виде', v: V.size + ' ' + V.sizeUnit },
+      { k: 'чанк', v: V.chunkSize + ' · ' + V.chunksHuman + ' шт' }
+    ];
+  }
+
+  function tree() {
+    return {
+      state: 'к выдаче', stampSub: 'раздача активна', stampClass: 'f-stamp--signal',
+      volName: V.name, volRows: volRows('папка, ' + V.filesHuman + ' файлов'),
+      facts: [
+        { k: 'состояние раздачи', v: 'активна', cls: '' },
+        { k: 'отправитель', v: 'на связи', cls: '' },
+        { k: 'осталось использований', v: 'без лимита', cls: '' },
+        { k: 'истекает через', v: '19 ч 40 мин', cls: '' }
+      ],
+      rows: M, treeNote: 'показаны 6 из 4 812 — список виртуализован',
+      needPassword: false, dead: false,
+      cta: 'Принять весь том', ctaClass: '',
+      ctaNote: 'подкаталог лежит в томе непрерывным куском — его можно взять одним запросом'
+    };
+  }
+
+  function file() {
+    var m = tree();
+    m.volName = V.name + '.mkv';
+    m.volRows = volRows('один файл');
+    m.rows = SINGLE;
+    m.treeNote = 'один файл — описи не требуется';
+    m.facts[2].v = '3';
+    m.facts[3].v = '71 мин';
+    m.cta = 'Принять файл';
+    m.ctaNote = 'сначала выберете, куда сохранить — приём идёт прямо в конечный файл';
+    return m;
+  }
+
+  function password() {
+    var m = tree();
+    m.state = 'нужен пароль'; m.stampSub = 'ключ из пароля'; m.stampClass = 'f-stamp--wait';
+    m.facts = [
+      { k: 'состояние раздачи', v: 'активна', cls: '' },
+      { k: 'режим ключа', v: 'пароль', cls: 'f-fact__v--warn' },
+      { k: 'осталось использований', v: '1', cls: '' },
+      { k: 'истекает через', v: '58 мин', cls: '' }
+    ];
+    m.treeNote = 'опись видна: манифест расшифрован';
+    m.needPassword = true;
+    m.ctaClass = 'is-disabled';
+    m.ctaNote = 'кнопка оживёт после ввода пароля';
+    return m;
+  }
+
+  function expired() {
+    var m = tree();
+    m.state = 'отказано'; m.stampSub = 'ссылка погашена'; m.stampClass = 'f-stamp--danger';
+    m.volName = V.name;
+    m.volRows = volRows('состав недоступен');
+    m.facts = [
+      { k: 'состояние раздачи', v: 'закрыта', cls: 'f-fact__v--danger' },
+      { k: 'код', v: 'uses_exhausted', cls: 'f-fact__v--danger' },
+      { k: 'осталось использований', v: '0', cls: 'f-fact__v--danger' },
+      { k: 'закрыта', v: '12 мин назад', cls: '' }
+    ];
+    m.rows = [{ n: '—', path: 'манифест не выдан: сессии больше нет', size: '—', offset: '—' }];
+    m.treeNote = 'опись недоступна';
+    m.dead = true;
+    m.deadTitle = 'Выдача закрыта';
+    m.deadCode = 'uses_exhausted';
+    m.deadText = 'Лимит использований исчерпан: раздачу открыли три раза из трёх. Попросите отправителя выдать новую ссылку — старая не оживает, а новая раздача получит и новый ключ.';
+    m.ctaClass = 'is-disabled';
+    m.ctaNote = 'новая ссылка = новая раздача и новый ключ';
+    return m;
+  }
+
+  Ferry.screen({
+    title: 'R1 · превью тома',
+    tickMs: 0,
+    scenarios: [
+      { key: 'tree', label: 'папка', build: tree, live: false },
+      { key: 'file', label: 'файл', build: file, live: false },
+      { key: 'password', label: 'пароль', build: password, live: false },
+      { key: 'expired', label: 'ссылка мертва', build: expired, live: false }
+    ]
+  });
+})();
+</script>
+</body>
+</html>

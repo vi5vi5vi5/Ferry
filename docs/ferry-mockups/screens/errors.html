@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry · E — экраны ошибок</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/ferry.css">
+</head>
+<body>
+
+<div class="f-proto" data-proto></div>
+
+<main class="f-page" data-screen>
+  <div class="f-page__inner">
+    <div class="f-sheet">
+
+      <header class="f-sheet__head">
+        <div class="f-brand">
+          <span class="f-brand__name">Ferry</span>
+          <span class="f-brand__sub">отказ в перевозке</span>
+        </div>
+        <span class="f-grow"></span>
+        <div class="f-id">
+          <span class="f-id__label">раздача</span>
+          <span class="f-id__value" data-f="id"></span>
+        </div>
+        <div class="f-stamp f-stamp--danger">
+          <span class="f-stamp__word">отказано</span>
+          <span class="f-stamp__sub" data-f="stamp"></span>
+        </div>
+      </header>
+
+      <section class="f-section" style="margin-top: var(--space-4);">
+        <div class="f-error">
+          <div class="f-row">
+            <h1 class="f-error__title" style="margin: 0;" data-f="title"></h1>
+            <span class="f-error__code" data-f="code"></span>
+          </div>
+          <p class="f-error__text" style="margin: 0;" data-f="text"></p>
+        </div>
+      </section>
+
+      <section class="f-section">
+        <div class="f-section__head">
+          <span class="f-section__num">01</span>
+          <h2 class="f-section__name">что делать дальше</h2>
+          <span class="f-section__rule"></span>
+        </div>
+        <div class="f-row" style="gap: var(--space-4);">
+          <button type="button" class="f-btn f-btn--lg f-btn--primary" data-f="cta"></button>
+          <span class="f-caption" data-f="out"></span>
+        </div>
+        <p class="f-caption" style="margin: var(--space-2) 0 0;">
+          Код рядом с текстом — не украшение: его можно вставить в сообщение отправителю или в баг-репорт. Текст без кода нельзя передать, код без текста нельзя понять.
+        </p>
+      </section>
+
+      <section class="f-section f-section--grow">
+        <div class="f-section__head">
+          <span class="f-section__num">02</span>
+          <h2 class="f-section__name">все коды протокола</h2>
+          <span class="f-section__rule"></span>
+          <span class="f-section__meta">§8 диздока</span>
+        </div>
+        <div class="f-table">
+          <div class="f-thead">
+            <span style="width: 200px; flex-shrink: 0;">код</span>
+            <span style="width: 280px; flex-shrink: 0;">заголовок экрана</span>
+            <span class="f-grow">выход</span>
+          </div>
+          <div data-list="all">
+            <template>
+              <div class="f-trow f-trow--dense" data-class="rowClass">
+                <span style="width: 200px; flex-shrink: 0; font: var(--text-mono-m);" data-class="codeClass" data-f="code"></span>
+                <span style="width: 280px; flex-shrink: 0; font: var(--text-caption);" data-f="title"></span>
+                <span class="f-grow f-caption" data-f="out"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </section>
+
+      <footer class="f-sheet__foot">
+        <a class="f-btn f-btn--secondary" href="r1-preview.html">Вернуться к превью тома</a>
+        <span class="f-grow"></span>
+        <span class="f-caption">Ни один из этих экранов не обвиняет пользователя: раздача — вещь с коротким сроком жизни, и это нормально.</span>
+      </footer>
+
+    </div>
+  </div>
+</main>
+
+<script src="../assets/fixtures.js"></script>
+<script src="../assets/ferry.js"></script>
+<script>
+(function () {
+  var E = FerryData.ERRORS, V = FerryData.VOLUME;
+
+  function build(code) {
+    var cur = E.filter(function (e) { return e.code === code; })[0];
+    return {
+      id: V.id,
+      code: cur.code, title: cur.title, text: cur.text, out: cur.out, cta: cur.cta, stamp: cur.stamp,
+      all: E.map(function (e) {
+        return {
+          code: e.code, title: e.title, out: e.out,
+          rowClass: e.code === code ? 'is-current' : '',
+          codeClass: e.code === code ? 'f-fact__v--danger' : ''
+        };
+      })
+    };
+  }
+
+  Ferry.screen({
+    title: 'E · экраны ошибок',
+    scenarioLabel: 'код',
+    tickMs: 0,
+    scenarios: E.map(function (e) {
+      return { key: e.code, label: e.code, live: false, build: function () { return build(e.code); } };
+    })
+  });
+})();
+</script>
+</body>
+</html>

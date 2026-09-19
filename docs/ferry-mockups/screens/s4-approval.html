@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry · S4 — запрос доступа</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/ferry.css">
+</head>
+<body>
+
+<div class="f-proto" data-proto></div>
+
+<main class="f-page" data-screen>
+  <div class="f-page__inner">
+    <div class="f-sheet">
+
+      <header class="f-sheet__head">
+        <div class="f-brand">
+          <span class="f-brand__name">Ferry</span>
+          <span class="f-brand__sub">накладная раздачи</span>
+        </div>
+        <span class="f-grow"></span>
+        <div class="f-id">
+          <span class="f-id__label">идентификатор</span>
+          <span class="f-id__value" data-f="id"></span>
+        </div>
+        <div class="f-stamp f-stamp--signal">
+          <span class="f-stamp__word">раздача идёт</span>
+          <span class="f-stamp__sub">с подтверждением</span>
+        </div>
+      </header>
+
+      <section class="f-section">
+        <div class="f-section__head">
+          <span class="f-section__num">01</span>
+          <h2 class="f-section__name">карта тома</h2>
+          <span class="f-section__rule"></span>
+          <span class="f-section__meta">двое качают, третий стучится</span>
+        </div>
+        <div class="f-vmap" data-vmap="map">
+          <div class="f-vmap__cursors"></div>
+          <div class="f-vmap__frame"></div>
+          <div class="f-vmap__ruler">
+            <span>0</span><span>1,8 ГиБ</span><span>3,5 ГиБ</span><span>5,3 ГиБ</span>
+            <span>7,1 ГиБ</span><span>8,9 ГиБ</span><span>10,6 ГиБ</span><span>12,4 ГиБ</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="f-section f-section--grow">
+        <div class="f-section__head">
+          <span class="f-section__num">02</span>
+          <h2 class="f-section__name">получатели</h2>
+          <span class="f-section__rule"></span>
+          <span class="f-section__meta">2 из 8 мест</span>
+        </div>
+        <div class="f-table">
+          <div class="f-thead">
+            <span class="f-col--name">получатель</span>
+            <span class="f-grow">принято</span>
+            <span class="f-col--pct">%</span>
+            <span class="f-col--rate">скорость</span>
+            <span class="f-col--role" style="justify-content: flex-end;">роль</span>
+          </div>
+          <div data-list="receivers">
+            <template>
+              <div class="f-trow">
+                <span class="f-col--name" data-f="name"></span>
+                <div class="f-bar"><i class="f-bar__fill" data-style="width:w1"></i></div>
+                <span class="f-col--pct" data-f="pct"></span>
+                <span class="f-col--rate" data-f="rate"></span>
+                <span class="f-col--role f-role" data-class="roleClass"><i></i><span data-f="role"></span></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </section>
+
+      <footer class="f-sheet__foot">
+        <div class="f-num">осталось 3 <span class="f-u">использования</span> · истекает через 71 <span class="f-u">мин</span></div>
+        <span class="f-grow"></span>
+        <button type="button" class="f-btn f-btn--danger">Закрыть доступ</button>
+      </footer>
+
+    </div>
+  </div>
+</main>
+
+<div class="f-modal" data-if="open" role="dialog" aria-modal="true" aria-labelledby="s4-title">
+  <div class="f-modal__sheet">
+    <div class="f-row">
+      <h1 class="f-modal__title" id="s4-title" style="margin: 0;">Просится в раздачу</h1>
+      <span class="f-grow"></span>
+      <div class="f-stamp f-stamp--wait">
+        <span class="f-stamp__word">ждёт ответа</span>
+        <span class="f-stamp__sub" data-f="waiting"></span>
+      </div>
+    </div>
+
+    <div class="f-facts">
+      <div class="f-fact"><span class="f-fact__k">как представился</span><span class="f-fact__dots"></span><span class="f-fact__v">Гость</span></div>
+      <div class="f-fact"><span class="f-fact__k">откуда (по IP, укрупнённо)</span><span class="f-fact__dots"></span><span class="f-fact__v">Москва</span></div>
+      <div class="f-fact"><span class="f-fact__k">ключ</span><span class="f-fact__dots"></span><span class="f-fact__v f-fact__v--ok">подтверждён</span></div>
+      <div class="f-fact"><span class="f-fact__k">останется использований</span><span class="f-fact__dots"></span><span class="f-fact__v">2 из 3</span></div>
+    </div>
+
+    <p class="f-caption" style="margin: 0;">
+      Имя человек ввёл сам — это всё, что о нём знает сервер. Владение ключом проверено challenge-response: без ключа сюда не стучатся, и отказ использование не тратит.
+    </p>
+
+    <div class="f-check">
+      <input type="checkbox" id="always">
+      <label for="always">
+        <span class="f-check__title">пускать всех дальше</span>
+        <span class="f-caption">Подтверждение снимется до конца раздачи: войдёт каждый, у кого есть ссылка целиком.</span>
+      </label>
+    </div>
+
+    <div class="f-row">
+      <button type="button" class="f-btn f-btn--lg f-btn--primary" data-close>Пустить</button>
+      <button type="button" class="f-btn f-btn--lg f-btn--secondary" data-close>Отказать</button>
+      <span class="f-grow"></span>
+      <span class="f-caption">Пока вы думаете, он видит «ждём разрешения».</span>
+    </div>
+  </div>
+</div>
+
+<script src="../assets/fixtures.js"></script>
+<script src="../assets/ferry.js"></script>
+<script>
+(function () {
+  var V = FerryData.VOLUME, css = Ferry.fmt.css, pct = Ferry.fmt.pct;
+  var open = true;
+
+  function model(t) {
+    var w = (t % 10) * 0.004;
+    return {
+      id: V.id,
+      open: open,
+      waiting: (12 + t) + ' с',
+      map: {
+        segments: Ferry.map([[0, 0.74 + w, 'have'], [0.74 + w, 0.80 + w, 'inflight']]),
+        cursors: [{ x: css(0.62), name: 'Лена' }, { x: css(0.76 + w), name: 'Костя' }]
+      },
+      receivers: [
+        { name: 'Костя', w1: css(0.76 + w), pct: pct(0.76 + w), rate: '112,4 МБ/с', role: 'качает', roleClass: 'f-role--leech' },
+        { name: 'Лена', w1: css(0.62), pct: '62 %', rate: '96,0 МБ/с', role: 'качает', roleClass: 'f-role--leech' }
+      ]
+    };
+  }
+
+  var screen = Ferry.screen({ title: 'S4 · запрос доступа', build: model });
+
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('[data-close]')) return;
+    open = false;
+    screen.rerender();
+  });
+})();
+</script>
+</body>
+</html>

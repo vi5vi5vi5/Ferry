@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry · S3 — активная раздача</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/ferry.css">
+</head>
+<body>
+
+<div class="f-proto" data-proto></div>
+
+<main class="f-page" data-screen>
+  <div class="f-page__inner">
+    <div class="f-sheet">
+
+      <header class="f-sheet__head">
+        <div class="f-brand">
+          <span class="f-brand__name">Ferry</span>
+          <span class="f-brand__sub">накладная раздачи</span>
+        </div>
+        <span class="f-grow"></span>
+        <div class="f-id">
+          <span class="f-id__label">идентификатор</span>
+          <span class="f-id__value" data-f="id"></span>
+        </div>
+        <div class="f-stamp" data-class="stampClass">
+          <span class="f-stamp__word" data-f="state"></span>
+          <span class="f-stamp__sub" data-f="stampSub"></span>
+        </div>
+      </header>
+
+      <div class="f-grid2">
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">01</span>
+            <h2 class="f-section__name">том</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <div class="f-facts" data-list="volRows">
+            <template>
+              <div class="f-fact">
+                <span class="f-fact__k" data-f="k"></span>
+                <span class="f-fact__dots"></span>
+                <span class="f-fact__v" data-f="v"></span>
+              </div>
+            </template>
+          </div>
+        </section>
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">02</span>
+            <h2 class="f-section__name">поток</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <div class="f-row" style="align-items: flex-start; gap: var(--space-5);">
+            <svg viewBox="0 0 220 120" width="220" height="120" style="flex-shrink: 0;"
+                 role="img" aria-label="Том отдаётся серверу один раз, сервер кормит получателей; один из них возвращает байты обратно">
+              <rect x="1" y="44" width="52" height="32" fill="none" stroke="var(--line-200)" stroke-width="1"></rect>
+              <text x="27" y="64" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--ink-200)">том</text>
+              <path d="M 56 52 L 96 52 L 96 46 L 112 60 L 96 74 L 96 68 L 56 68 Z" data-style="fill:senderArrow"></path>
+              <rect x="116" y="42" width="40" height="36" fill="none" stroke="var(--line-200)" stroke-width="1"></rect>
+              <text x="136" y="64" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--ink-200)">сервер</text>
+              <path d="M 158 60 L 202 22" stroke="var(--chunk-have)" stroke-width="2" fill="none"></path>
+              <path d="M 158 60 L 202 60" stroke="var(--chunk-have)" stroke-width="2" fill="none"></path>
+              <path d="M 158 60 L 202 98" stroke="var(--chunk-have)" stroke-width="2" fill="none"></path>
+              <rect x="204" y="18" width="8" height="8" fill="var(--chunk-have)"></rect>
+              <rect x="204" y="56" width="8" height="8" fill="var(--chunk-have)"></rect>
+              <rect x="204" y="94" width="8" height="8" data-style="fill:thirdPeer"></rect>
+              <path d="M 206 92 C 180 84, 166 76, 158 70" stroke="var(--seed)" stroke-width="1.5" fill="none"
+                    stroke-dasharray="3 3" data-style="opacity:seedArrow"></path>
+            </svg>
+            <div class="f-grow">
+              <div class="f-big">
+                <span class="f-big__value" data-f="rate"></span>
+                <span class="f-big__unit">МБ/с отдаётся серверу</span>
+              </div>
+              <div class="f-facts" data-list="sources" style="margin-top: var(--space-2);">
+                <template>
+                  <div class="f-fact">
+                    <i style="width: 10px; height: 10px; flex-shrink: 0;" data-style="background:color"></i>
+                    <span class="f-fact__k" data-f="name"></span>
+                    <span class="f-fact__dots"></span>
+                    <span class="f-fact__v" data-f="value"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <section class="f-section">
+        <div class="f-section__head">
+          <span class="f-section__num">03</span>
+          <h2 class="f-section__name">ссылка и ключ</h2>
+          <span class="f-section__rule"></span>
+        </div>
+        <div class="f-link">
+          <div class="f-link__body">
+            <p class="f-link__value" style="margin: 0;"><span data-f="linkBase"></span><span class="f-link__key" data-f="linkKey"></span></p>
+            <p class="f-caption" style="margin: 0;">Часть после решётки — ключ. На сервер она не уходит: её нет ни в запросе, ни в логах, ни в Referer. Кто получил ссылку целиком — получил том.</p>
+            <div class="f-row">
+              <button type="button" class="f-btn f-btn--primary">Копировать</button>
+              <button type="button" class="f-btn f-btn--secondary">Ссылка без ключа</button>
+              <button type="button" class="f-btn f-btn--ghost">Показать QR крупно</button>
+            </div>
+          </div>
+          <div class="f-qr"><div data-qr></div></div>
+        </div>
+      </section>
+
+      <section class="f-section">
+        <div class="f-section__head">
+          <span class="f-section__num">04</span>
+          <h2 class="f-section__name">карта тома</h2>
+          <span class="f-section__rule"></span>
+          <span class="f-section__meta" data-f="mapNote"></span>
+        </div>
+        <div class="f-vmap" data-vmap="map">
+          <div class="f-vmap__cursors"></div>
+          <div class="f-vmap__frame"></div>
+          <div class="f-vmap__ruler">
+            <span>0</span><span>1,8 ГиБ</span><span>3,5 ГиБ</span><span>5,3 ГиБ</span>
+            <span>7,1 ГиБ</span><span>8,9 ГиБ</span><span>10,6 ГиБ</span><span>12,4 ГиБ</span>
+          </div>
+          <div class="f-legend">
+            <span><i style="background: var(--chunk-none)"></i>нет</span>
+            <span><i style="background: var(--chunk-inflight)"></i>в пути</span>
+            <span><i style="background: var(--chunk-have)"></i>есть</span>
+            <span><i style="background: var(--chunk-peer)"></i>от пира</span>
+            <span><i style="background: var(--chunk-sender)"></i>от отправителя</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="f-section f-section--grow">
+        <div class="f-section__head">
+          <span class="f-section__num">05</span>
+          <h2 class="f-section__name">получатели</h2>
+          <span class="f-section__rule"></span>
+          <span class="f-section__meta" data-f="slots"></span>
+        </div>
+        <div class="f-table">
+          <div class="f-thead">
+            <span class="f-col--name">получатель</span>
+            <span class="f-grow">принято</span>
+            <span class="f-col--pct">%</span>
+            <span class="f-col--rate">скорость</span>
+            <span class="f-col--eta">осталось</span>
+            <span class="f-col--role" style="justify-content: flex-end;">роль</span>
+          </div>
+          <div data-list="receivers">
+            <template>
+              <div class="f-trow">
+                <span class="f-col--name" data-f="name"></span>
+                <div class="f-bar">
+                  <i class="f-bar__fill" data-class="fillClass" data-style="width:w1"></i>
+                  <i class="f-bar__fill" data-if="two" data-style="left:x2;width:w2"></i>
+                </div>
+                <span class="f-col--pct" data-f="pct"></span>
+                <span class="f-col--rate" data-f="rate"></span>
+                <span class="f-col--eta" data-f="eta"></span>
+                <span class="f-col--role f-role" data-class="roleClass"><i></i><span data-f="role"></span></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </section>
+
+      <footer class="f-sheet__foot">
+        <div>
+          <div class="f-brand__sub" style="margin-bottom: 4px;">условия выдачи</div>
+          <div class="f-num">осталось 3 <span class="f-u">использования</span> · истекает через 71 <span class="f-u">мин</span> · не более 8 <span class="f-u">одновременно</span></div>
+          <div class="f-caption" style="margin-top: 4px;" data-f="tabNote"></div>
+        </div>
+        <span class="f-grow"></span>
+        <button type="button" class="f-btn f-btn--secondary">Продлить</button>
+        <button type="button" class="f-btn f-btn--danger">Закрыть доступ</button>
+      </footer>
+
+    </div>
+  </div>
+</main>
+
+<script src="../assets/fixtures.js"></script>
+<script src="../assets/ferry.js"></script>
+<script>
+(function () {
+  var V = FerryData.VOLUME, L = FerryData.LINK;
+  var css = Ferry.fmt.css, pct = Ferry.fmt.pct;
+
+  var VOL_ROWS = [
+    { k: 'имя тома', v: V.name },
+    { k: 'состав', v: V.filesHuman + ' файлов, ' + V.dirs + ' папок' },
+    { k: 'размер', v: V.bytesHuman + ' байт' },
+    { k: 'чанк', v: V.chunkSize + ' · ' + V.chunksHuman + ' шт' },
+    { k: 'манифест', v: 'зашифрован, серверу не виден' }
+  ];
+
+  function src(win, peer, sender) {
+    return [
+      { name: 'из окна сервера', value: win, color: 'var(--chunk-have)' },
+      { name: 'от других получателей', value: peer, color: 'var(--chunk-peer)' },
+      { name: 'от отправителя', value: sender, color: 'var(--chunk-sender)' }
+    ];
+  }
+
+  function row(o) {
+    return {
+      name: o.name,
+      w1: css(o.p1), x2: css(o.x2 || 0), w2: css(o.w2 || 0), two: !!o.two,
+      fillClass: o.peer ? 'f-bar__fill--peer' : '',
+      pct: o.pct, rate: o.rate, eta: o.eta, role: o.role, roleClass: o.roleClass
+    };
+  }
+
+  function base(scen, t) {
+    var w = (t % 10) * 0.004;                   /* раздача едет вперёд */
+    var m = {
+      id: V.id, linkBase: L.base, linkKey: L.key,
+      volRows: VOL_ROWS,
+      senderArrow: 'var(--signal)',
+      thirdPeer: 'var(--chunk-have)',
+      seedArrow: '0',
+      slots: '',
+      tabNote: 'раздача идёт, пока открыта эта вкладка'
+    };
+
+    if (scen === 'solo') {
+      m.state = 'раздача идёт'; m.stampSub = 'принято к перевозке'; m.stampClass = 'f-stamp--signal';
+      m.rate = '94,2';
+      m.sources = src('100 %', '0 %', '0 %');
+      m.map = {
+        segments: Ferry.map([[0, 0.80 + w, 'have'], [0.80 + w, 0.86 + w, 'inflight']]),
+        cursors: [{ x: css(0.82 + w), name: 'Костя' }]
+      };
+      m.mapNote = 'окно едет со скоростью отправителя';
+      m.receivers = [row({ name: 'Костя', p1: 0.82 + w, pct: pct(0.82 + w), rate: '94,2 МБ/с', eta: '1 мин 40 с', role: 'качает', roleClass: 'f-role--leech' })];
+    }
+
+    if (scen === 'trio') {
+      m.state = 'раздача идёт'; m.stampSub = 'принято к перевозке'; m.stampClass = 'f-stamp--signal';
+      m.rate = '112,4';
+      m.thirdPeer = 'var(--chunk-peer)';
+      m.sources = src('71 %', '29 %', '0 %');
+      m.map = {
+        segments: Ferry.map([[0, 0.86 + w, 'have'], [0.86 + w, 0.92 + w, 'inflight'], [0.36, 0.46, 'peer']]),
+        cursors: [{ x: css(0.42), name: 'Марк', catching: true }, { x: css(0.88 + w), name: 'Лена и Костя' }]
+      };
+      m.mapNote = 'Марк выпал из окна и добирает своё от других';
+      m.receivers = [
+        row({ name: 'Костя', p1: 0.90 + w, pct: pct(0.90 + w), rate: '118,0 МБ/с', eta: '52 с', role: 'качает', roleClass: 'f-role--leech' }),
+        row({ name: 'Лена', p1: 0.88 + w, pct: pct(0.88 + w), rate: '109,4 МБ/с', eta: '1 мин 08 с', role: 'качает', roleClass: 'f-role--leech' }),
+        row({ name: 'Марк', p1: 0.42, peer: true, pct: '42 %', rate: '11,8 МБ/с', eta: '14 мин 20 с', role: 'догоняет', roleClass: 'f-role--catching' })
+      ];
+    }
+
+    if (scen === 'late') {
+      m.state = 'раздача идёт'; m.stampSub = 'принято к перевозке'; m.stampClass = 'f-stamp--signal';
+      m.rate = '118,0';
+      m.thirdPeer = 'var(--chunk-peer)'; m.seedArrow = '1';
+      m.sources = src('64 %', '29 %', '7 %');
+      m.map = {
+        segments: Ferry.map([[0, 0.26, 'peer'], [0.26, 0.32, 'sender'], [0.60, 0.82 + w, 'have'], [0.82 + w, 0.88 + w, 'inflight']]),
+        cursors: [{ x: css(0.30), name: 'Марк · волна 2', catching: true }, { x: css(0.84 + w), name: 'волна 1' }]
+      };
+      m.mapNote = 'третий вошёл на 60 %: хвост со всеми, начало от сида';
+      m.receivers = [
+        row({ name: 'Костя', p1: 0.84 + w, pct: pct(0.84 + w), rate: '118,0 МБ/с', eta: '1 мин 12 с', role: 'качает', roleClass: 'f-role--leech' }),
+        row({ name: 'Лена', p1: 1, peer: true, pct: '100 %', rate: '38,4 МБ/с', eta: '—', role: 'раздаёт другим', roleClass: 'f-role--seed' }),
+        row({ name: 'Марк', p1: 0.30, peer: true, two: true, x2: 0.60, w2: 0.24 + w, pct: pct(0.54 + w), rate: '96,2 МБ/с', eta: '3 мин 04 с', role: 'догоняет', roleClass: 'f-role--catching' })
+      ];
+    }
+
+    if (scen === 'deleg') {
+      m.state = 'делегировано'; m.stampSub = 'отправитель сошёл на берег'; m.stampClass = 'f-stamp--wait';
+      m.rate = '38,4';
+      m.senderArrow = 'var(--chunk-none)'; m.thirdPeer = 'var(--chunk-peer)'; m.seedArrow = '1';
+      m.sources = src('0 %', '100 %', '0 %');
+      m.map = {
+        segments: Ferry.map([[0, 0.52, 'peer'], [0.52, 0.66 + w, 'have'], [0.66 + w, 0.72 + w, 'inflight']]),
+        cursors: [{ x: css(0.68 + w), name: 'Марк' }]
+      };
+      m.mapNote = 'источник — только сид: отправителя в раздаче больше нет';
+      m.tabNote = 'настройки заморожены: менять их больше некому';
+      m.receivers = [
+        row({ name: 'Лена', p1: 1, peer: true, pct: '100 %', rate: '38,4 МБ/с', eta: '—', role: 'раздаёт другим', roleClass: 'f-role--seed' }),
+        row({ name: 'Марк', p1: 0.68 + w, peer: true, pct: pct(0.68 + w), rate: '38,4 МБ/с', eta: '6 мин 12 с', role: 'качает', roleClass: 'f-role--leech' })
+      ];
+    }
+
+    m.slots = m.receivers.length + ' из 8 мест';
+    return m;
+  }
+
+  Ferry.screen({
+    title: 'S3 · активная раздача',
+    scenarios: [
+      { key: 'trio', label: 'трое', build: function (t) { return base('trio', t); } },
+      { key: 'late', label: 'третий на 60 %', build: function (t) { return base('late', t); } },
+      { key: 'solo', label: 'один', build: function (t) { return base('solo', t); } },
+      { key: 'deleg', label: 'без отправителя', build: function (t) { return base('deleg', t); } }
+    ]
+  });
+})();
+</script>
+</body>
+</html>

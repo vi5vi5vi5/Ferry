@@ -18,4 +18,3 @@ Server/web/dl/
 .vs/
 *.user
 CMakeUserPresets.json
-docs

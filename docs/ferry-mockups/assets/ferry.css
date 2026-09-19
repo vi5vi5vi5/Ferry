@@ -1,0 +1,430 @@
+/* Ferry · слой компонентов, стиль «судовая накладная».
+   Все значения берутся из tokens.css. Ни одного литерального цвета.
+   Префикс f- у всех классов, чтобы ничего не столкнулось при переносе в React. */
+
+/* ─── основа страницы ────────────────────────────────────────────────────── */
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--surface-000);
+  color: var(--ink-100);
+  font: var(--text-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+.f-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.f-num  { font: var(--text-mono-num); font-variant-numeric: tabular-nums; }
+.f-u    { color: var(--ink-300); }               /* единица измерения рядом с числом */
+.f-grow { flex-grow: 1; }
+.f-hidden { display: none !important; }
+
+.f-page {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.f-page__inner {
+  width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) var(--space-7);
+  flex-grow: 1;
+  display: flex;
+}
+
+/* ─── лист накладной ─────────────────────────────────────────────────────── */
+
+.f-sheet {
+  flex-grow: 1;
+  background: var(--surface-100);
+  border: var(--hairline) solid var(--line-200);
+  padding: 36px 44px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.f-sheet__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-5);
+  padding-bottom: 14px;
+  border-bottom: 2px solid var(--ink-100);
+}
+
+.f-sheet__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding-top: 14px;
+  border-top: 2px solid var(--ink-100);
+}
+
+.f-brand { display: flex; flex-direction: column; gap: 2px; }
+.f-brand__name { font: var(--text-display-m); color: var(--ink-100); }
+.f-brand__sub  { font: var(--text-mono-s); letter-spacing: .12em; text-transform: uppercase; color: var(--ink-300); }
+
+.f-id { display: flex; flex-direction: column; gap: 2px; text-align: right; }
+.f-id__label { font: var(--text-mono-s); letter-spacing: .12em; text-transform: uppercase; color: var(--ink-300); }
+.f-id__value { font: var(--text-mono-m); color: var(--ink-100); }
+
+/* штамп состояния — правый верхний угол листа */
+.f-stamp {
+  padding: var(--space-2) 14px;
+  border: var(--hairline) solid var(--line-200);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
+}
+.f-stamp__word { font: var(--text-mono-s); font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-200); }
+.f-stamp__sub  { font: var(--text-mono-s); color: var(--ink-300); }
+.f-stamp--signal { border-color: var(--signal); }
+.f-stamp--signal .f-stamp__word { color: var(--signal-text); }
+.f-stamp--ok     { border-color: var(--ok); }
+.f-stamp--ok .f-stamp__word { color: var(--ok-text); }
+.f-stamp--warn   { border-color: var(--warn); }
+.f-stamp--warn .f-stamp__word { color: var(--warn-text); }
+.f-stamp--danger { border-color: var(--danger); }
+.f-stamp--danger .f-stamp__word { color: var(--danger-text); }
+.f-stamp--wait   { border-color: var(--wait); }
+.f-stamp--wait .f-stamp__word { color: var(--ink-200); }
+
+/* ─── секции накладной ───────────────────────────────────────────────────── */
+
+.f-section { display: flex; flex-direction: column; gap: var(--space-2); }
+.f-section--grow { flex-grow: 1; min-height: 0; }
+
+.f-section__head { display: flex; align-items: center; gap: var(--space-3); }
+.f-section__num  { font: var(--text-mono-s); color: var(--ink-300); }
+.f-section__name { font: var(--text-mono-s); font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-100); }
+.f-section__rule { flex-grow: 1; height: var(--hairline); background: var(--line-100); }
+.f-section__meta { font: var(--text-mono-s); color: var(--ink-300); }
+
+.f-grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 44px; }
+.f-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-5); }
+.f-row   { display: flex; align-items: center; gap: var(--space-3); }
+.f-stack { display: flex; flex-direction: column; gap: var(--space-3); }
+
+/* ─── строка «ключ … значение» с точечной выноской ───────────────────────── */
+
+.f-facts { display: flex; flex-direction: column; }
+
+.f-fact {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 6px 0;
+  border-bottom: var(--hairline) solid var(--line-100);
+}
+.f-fact__k    { font: var(--text-caption); color: var(--ink-200); }
+.f-fact__dots { flex-grow: 1; height: 1px; border-bottom: 1px dotted var(--line-100); }
+.f-fact__v    { font: var(--text-mono-m); color: var(--ink-100); white-space: nowrap; }
+.f-fact__v--ok     { color: var(--ok-text); }
+.f-fact__v--warn   { color: var(--warn-text); }
+.f-fact__v--danger { color: var(--danger-text); }
+.f-fact__v--seed   { color: var(--seed-text); }
+
+/* ─── крупное число экрана ───────────────────────────────────────────────── */
+
+.f-big { display: flex; align-items: baseline; gap: var(--space-2); }
+.f-big__value { font: var(--text-display-l); font-variant-numeric: tabular-nums; color: var(--ink-100); }
+.f-big__unit  { font: var(--text-body); color: var(--ink-300); }
+
+/* ─── карта тома ─────────────────────────────────────────────────────────── */
+
+.f-vmap { display: flex; flex-direction: column; gap: var(--space-2); }
+
+.f-vmap__cursors { position: relative; height: 18px; }
+.f-vmap__cursor  { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; font: var(--text-mono-s); color: var(--ink-200); }
+.f-vmap__cursor--catching { color: var(--seed-text); }
+
+.f-vmap__frame {
+  position: relative;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-300);
+  border: var(--hairline) solid var(--line-200);
+  border-radius: var(--radius-0);
+}
+.f-vmap__seg {
+  flex: 1 1 0;
+  min-width: var(--chunk-min-w);
+  height: var(--track-lg);
+  background: var(--chunk-none);
+  transition: background 240ms linear;
+}
+.f-vmap__line {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: var(--cursor-w);
+  background: var(--ink-100);
+  transform: translateX(-50%);
+}
+.f-vmap__line--catching { background: var(--seed-text); }
+
+.f-vmap__ruler { display: flex; }
+.f-vmap__ruler span {
+  flex: 1 1 0;
+  font: var(--text-mono-s);
+  color: var(--ink-300);
+  border-left: var(--hairline) solid var(--line-100);
+  padding-left: var(--space-1);
+}
+.f-vmap__ruler span:last-child { text-align: right; padding-right: 0; border-right: none; }
+
+.f-legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
+.f-legend span { display: inline-flex; align-items: center; gap: 5px; font: var(--text-mono-s); color: var(--ink-200); }
+.f-legend i { width: 9px; height: 9px; display: inline-block; }
+
+/* ─── две волны ──────────────────────────────────────────────────────────── */
+
+.f-wave { display: flex; align-items: center; gap: var(--space-4); }
+.f-wave__label { width: 210px; flex-shrink: 0; font: var(--text-mono-s); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-300); }
+.f-wave__label--seed { color: var(--seed-text); }
+.f-wave__track {
+  flex-grow: 1;
+  position: relative;
+  height: var(--track-md);
+  background: var(--surface-300);
+  border: var(--hairline) solid var(--line-200);
+  border-radius: var(--radius-0);
+}
+.f-wave__fill { position: absolute; top: 0; bottom: 0; background: var(--chunk-have); transition: width 240ms linear, left 240ms linear; }
+.f-wave__fill--seed { background: var(--seed); }
+.f-wave__value { width: 64px; flex-shrink: 0; text-align: right; font: var(--text-mono-num); color: var(--ink-100); }
+
+.f-sources { display: flex; flex-wrap: wrap; gap: var(--space-4); }
+.f-source { display: inline-flex; align-items: center; gap: var(--space-2); font: var(--text-caption); color: var(--ink-200); }
+.f-source i { width: 10px; height: 10px; display: inline-block; }
+.f-source b { font: var(--text-mono-num); color: var(--ink-100); }
+
+/* ─── таблицы: получатели и файлы ────────────────────────────────────────── */
+
+.f-table { display: flex; flex-direction: column; }
+
+.f-thead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-1) 0;
+  border-bottom: var(--hairline) solid var(--line-200);
+}
+.f-thead span { font: var(--text-mono-s); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-300); }
+
+.f-trow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: 36px;
+  border-bottom: var(--hairline) solid var(--line-100);
+}
+.f-trow--dense { height: 28px; }
+
+.f-col--name   { width: 140px; flex-shrink: 0; font: var(--text-body-strong); color: var(--ink-100); }
+.f-col--pct    { width: 56px;  flex-shrink: 0; text-align: right; font: var(--text-mono-num); color: var(--ink-100); }
+.f-col--rate   { width: 108px; flex-shrink: 0; text-align: right; font: var(--text-mono-num); color: var(--ink-100); }
+.f-col--eta    { width: 112px; flex-shrink: 0; text-align: right; font: var(--text-mono-num); color: var(--ink-100); }
+.f-col--role   { width: 152px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--space-2); }
+.f-col--size   { width: 120px; flex-shrink: 0; text-align: right; font: var(--text-mono-m); color: var(--ink-100); }
+.f-col--offset { width: 176px; flex-shrink: 0; text-align: right; font: var(--text-mono-s); color: var(--ink-300); }
+.f-col--num    { width: 48px;  flex-shrink: 0; font: var(--text-mono-s); color: var(--ink-300); }
+.f-col--path   { flex-grow: 1; min-width: 0; font: var(--text-mono-m); color: var(--ink-100); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* полоса прогресса внутри строки получателя */
+.f-bar { flex-grow: 1; position: relative; height: var(--track-sm); background: var(--surface-300); border-radius: var(--radius-0); }
+.f-bar__fill { position: absolute; top: 0; bottom: 0; background: var(--chunk-have); transition: width 240ms linear, left 240ms linear; }
+.f-bar__fill--peer { background: var(--chunk-peer); }
+.f-bar__fill--seed { background: var(--seed); }
+
+/* чип роли: квадратная точка и слово.
+   Оранжевый в чипы не попадает: signal зарезервирован за главным действием
+   и за байтом, который отправитель отдал своим аплоадом (patterns.md, правило 4). */
+.f-role { display: inline-flex; align-items: center; gap: var(--space-2); font: var(--text-caption); color: var(--ink-200); }
+.f-role i { width: 8px; height: 8px; display: inline-block; border-radius: var(--radius-sm); background: var(--wait); }
+.f-role--leech   i { background: var(--wait); }
+.f-role--catching i { background: var(--chunk-inflight); }
+.f-role--seed    i { background: var(--seed); }
+.f-role--done    i { background: var(--ok); }
+.f-role--wait    i { background: var(--wait); animation: f-pulse 1.4s linear infinite; }
+
+@keyframes f-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .f-role--wait i { animation: none; }
+  .f-vmap__seg, .f-wave__fill, .f-bar__fill { transition: none; }
+}
+
+/* ─── ссылка и QR ────────────────────────────────────────────────────────── */
+
+.f-link { display: flex; gap: var(--space-5); align-items: center; }
+.f-link__body { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.f-link__value { font: var(--text-mono-l); color: var(--ink-100); word-break: break-all; }
+.f-link__key   { color: var(--signal-text); }
+.f-qr { flex-shrink: 0; padding: var(--space-2); background: var(--qr-ground); border-radius: var(--radius-lg); }
+.f-qr canvas, .f-qr div { display: block; }
+
+/* ─── кнопки и поля ──────────────────────────────────────────────────────── */
+
+.f-btn {
+  font: var(--text-body-strong);
+  border-radius: var(--radius-md);
+  border: var(--hairline) solid transparent;
+  padding: 7px 14px;
+  cursor: pointer;
+  background: none;
+  color: var(--ink-100);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.f-btn--lg { padding: 9px 18px; }
+.f-btn--primary   { background: var(--signal); color: var(--ink-on-signal); }
+.f-btn--secondary { border-color: var(--line-200); color: var(--ink-100); }
+.f-btn--ghost     { color: var(--ink-200); }
+.f-btn--danger    { background: var(--danger); color: var(--ink-on-danger); }
+.f-btn--sm        { font: var(--text-caption); font-weight: 600; padding: 5px 12px; }
+.f-btn[disabled], .f-btn.is-disabled { opacity: .45; cursor: not-allowed; }
+
+:focus-visible { outline: var(--focus-ring) solid var(--focus); outline-offset: 2px; }
+
+.f-field { display: flex; flex-direction: column; gap: var(--space-2); }
+.f-field__label { font: var(--text-mono-s); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-300); }
+.f-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: var(--hairline) solid var(--line-200);
+  border-radius: var(--radius-md);
+  background: var(--surface-200);
+  color: var(--ink-100);
+  font: var(--text-mono-m);
+}
+.f-caption { font: var(--text-caption); color: var(--ink-200); }
+.f-caption--warn { color: var(--warn-text); }
+.f-caption--ok   { color: var(--ok-text); }
+.f-caption--danger { color: var(--danger-text); }
+
+/* переключатель из сегментов: использования, срок жизни */
+.f-seg { display: inline-flex; gap: 2px; padding: 2px; background: var(--surface-200); border: var(--hairline) solid var(--line-100); border-radius: var(--radius-sm); }
+.f-seg button {
+  font: var(--text-caption); font-weight: 600;
+  padding: 5px 12px; border: 0; border-radius: var(--radius-sm);
+  background: none; color: var(--ink-300); cursor: pointer;
+}
+.f-field .f-seg { align-self: flex-start; }
+.f-seg button[aria-pressed="true"] { background: var(--surface-100); color: var(--ink-100); box-shadow: var(--shadow-raised); }
+
+/* галочка с подписью в две строки */
+.f-check { display: flex; align-items: flex-start; gap: var(--space-3); }
+.f-check input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--signal); flex-shrink: 0; }
+.f-check label { display: flex; flex-direction: column; gap: 2px; cursor: pointer; }
+.f-check__title { font: var(--text-body-strong); color: var(--ink-100); }
+.f-check--seed input { accent-color: var(--seed); }
+.f-check.is-disabled label { opacity: .45; cursor: not-allowed; }
+
+/* ─── плашки и заметки ───────────────────────────────────────────────────── */
+
+.f-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px 14px;
+  border: var(--hairline) solid var(--line-200);
+}
+.f-note--signal { border-color: var(--signal); background: var(--signal-muted); }
+.f-note--warn   { border-color: var(--warn); }
+.f-note--danger { border-color: var(--danger); }
+.f-note--ok     { border-color: var(--ok); }
+.f-note--wait   { border-color: var(--wait); }
+.f-note__dot { width: 8px; height: 8px; border-radius: var(--radius-full); background: var(--wait); flex-shrink: 0; animation: f-pulse 1.4s linear infinite; }
+.f-note__text { font: var(--text-body); color: var(--ink-100); }
+
+/* ─── дропзона S1 ────────────────────────────────────────────────────────── */
+
+.f-drop {
+  flex-grow: 1;
+  border: 2px dashed var(--line-200);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-5);
+  padding: var(--space-8);
+  text-align: center;
+}
+.f-drop.is-over { border-color: var(--signal); background: var(--signal-muted); }
+.f-drop__title { font: var(--text-display-m); color: var(--ink-100); }
+
+/* ─── модалка ────────────────────────────────────────────────────────────── */
+
+.f-modal { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: var(--space-6); background: var(--overlay); z-index: 10; }
+.f-modal__sheet {
+  width: 560px;
+  max-width: 100%;
+  background: var(--surface-100);
+  border: var(--hairline) solid var(--line-200);
+  box-shadow: var(--shadow-modal);
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.f-modal__title { font: var(--text-display-m); color: var(--ink-100); }
+
+/* ─── дерево файлов ──────────────────────────────────────────────────────── */
+
+.f-tree { display: flex; flex-direction: column; }
+.f-tree__row { display: flex; align-items: center; gap: var(--space-2); height: 28px; border-bottom: var(--hairline) solid var(--line-100); }
+.f-tree__mark { width: 16px; text-align: center; font: var(--text-caption); color: var(--ink-300); }
+.f-tree__name { font: var(--text-mono-m); color: var(--ink-100); }
+.f-tree__name--dir { font-weight: 500; }
+
+/* ─── экран ошибки ───────────────────────────────────────────────────────── */
+
+.f-error { display: flex; flex-direction: column; gap: var(--space-3); padding-left: var(--space-4); border-left: 3px solid var(--danger); }
+.f-error__title { font: var(--text-display-m); color: var(--ink-100); }
+.f-error__code  { font: var(--text-mono-m); color: var(--danger-text); }
+.f-error__text  { font: var(--text-body); color: var(--ink-200); max-width: 60ch; }
+
+/* ─── панель макета (в продукте её нет) ──────────────────────────────────── */
+
+.f-proto {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: 0 var(--space-5);
+  height: 52px;
+  background: var(--surface-300);
+  border-bottom: 1px dashed var(--line-200);
+  flex-wrap: wrap;
+}
+.f-proto__label { font: var(--text-mono-s); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-300); }
+.f-proto__label a { color: var(--ink-200); }
+.f-proto__group { display: flex; align-items: center; gap: var(--space-2); }
+
+/* ─── узкие экраны: всё в одну колонку ───────────────────────────────────── */
+
+@media (max-width: 900px) {
+  .f-page__inner { padding: var(--space-4) var(--space-3) var(--space-6); }
+  .f-sheet { padding: var(--space-5) var(--space-4); }
+  .f-grid2, .f-grid3 { grid-template-columns: minmax(0, 1fr); gap: var(--space-5); }
+  .f-link { flex-direction: column; align-items: flex-start; }
+  .f-link__value { font: var(--text-mono-m); }
+  .f-wave { flex-wrap: wrap; }
+  .f-wave__label { width: 100%; }
+  .f-sheet__head { flex-wrap: wrap; }
+  .f-col--eta, .f-col--offset { display: none; }
+  .f-col--name { width: 104px; }
+  .f-col--role { width: auto; }
+  .f-proto { height: auto; padding: var(--space-2) var(--space-3); }
+}

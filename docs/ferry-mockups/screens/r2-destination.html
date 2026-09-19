@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry · R2 — куда сохранить</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/ferry.css">
+</head>
+<body>
+
+<div class="f-proto" data-proto></div>
+
+<main class="f-page" data-screen>
+  <div class="f-page__inner">
+    <div class="f-sheet">
+
+      <header class="f-sheet__head">
+        <div class="f-brand">
+          <span class="f-brand__name">Ferry</span>
+          <span class="f-brand__sub">место выгрузки</span>
+        </div>
+        <span class="f-grow"></span>
+        <div class="f-stamp" data-class="stampClass">
+          <span class="f-stamp__word" data-f="stampWord"></span>
+          <span class="f-stamp__sub" data-f="stampSub"></span>
+        </div>
+      </header>
+
+      <div class="f-grid2">
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">01</span>
+            <h2 class="f-section__name">что принимаем</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <p style="font: var(--text-display-m); margin: var(--space-1) 0;" data-f="volName"></p>
+          <div class="f-facts">
+            <div class="f-fact"><span class="f-fact__k">размер</span><span class="f-fact__dots"></span><span class="f-fact__v" data-f="size"></span></div>
+            <div class="f-fact"><span class="f-fact__k">файлов</span><span class="f-fact__dots"></span><span class="f-fact__v" data-f="files"></span></div>
+            <div class="f-fact"><span class="f-fact__k">чанк</span><span class="f-fact__dots"></span><span class="f-fact__v" data-f="chunk"></span></div>
+          </div>
+
+          <div class="f-section__head" style="margin-top: var(--space-4);">
+            <span class="f-section__num">02</span>
+            <h2 class="f-section__name">место на диске</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <div class="f-facts" data-list="space">
+            <template>
+              <div class="f-fact">
+                <span class="f-fact__k" data-f="k"></span>
+                <span class="f-fact__dots"></span>
+                <span class="f-fact__v" data-class="cls" data-f="v"></span>
+              </div>
+            </template>
+          </div>
+          <p class="f-caption" data-class="spaceNoteClass" style="margin: var(--space-2) 0 0;" data-f="spaceNote"></p>
+        </section>
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">03</span>
+            <h2 class="f-section__name">как писать на диск</h2>
+            <span class="f-section__rule"></span>
+          </div>
+
+          <div class="f-stack" data-list="paths">
+            <template>
+              <div class="f-note" data-class="cls" style="align-items: flex-start;">
+                <div class="f-stack" style="gap: 4px;">
+                  <div class="f-row" style="gap: var(--space-2);">
+                    <span style="font: var(--text-body-strong);" data-f="title"></span>
+                    <span class="f-brand__sub" data-f="tag"></span>
+                  </div>
+                  <span class="f-caption" data-f="text"></span>
+                  <span class="f-caption" data-class="seedClass" data-f="seed"></span>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <div class="f-row" style="margin-top: var(--space-3);">
+            <button type="button" class="f-btn f-btn--secondary" data-f="picker"></button>
+            <span class="f-caption" data-f="pickerNote"></span>
+          </div>
+        </section>
+
+      </div>
+
+      <section class="f-section">
+        <div class="f-section__head">
+          <span class="f-section__num">04</span>
+          <h2 class="f-section__name">куда ляжет</h2>
+          <span class="f-section__rule"></span>
+        </div>
+        <div class="f-facts">
+          <div class="f-fact"><span class="f-fact__k">путь</span><span class="f-fact__dots"></span><span class="f-fact__v" data-f="dest"></span></div>
+          <div class="f-fact"><span class="f-fact__k">режим записи</span><span class="f-fact__dots"></span><span class="f-fact__v" data-f="mode"></span></div>
+          <div class="f-fact"><span class="f-fact__k">сможете ли раздавать другим</span><span class="f-fact__dots"></span><span class="f-fact__v" data-class="canSeedClass" data-f="canSeed"></span></div>
+          <div class="f-fact"><span class="f-fact__k">докачка после обрыва</span><span class="f-fact__dots"></span><span class="f-fact__v" data-class="resumeClass" data-f="resume"></span></div>
+        </div>
+      </section>
+
+      <footer class="f-sheet__foot">
+        <button type="button" class="f-btn f-btn--lg f-btn--primary">Начать приём</button>
+        <button type="button" class="f-btn f-btn--lg f-btn--ghost">Назад к описи</button>
+        <span class="f-grow"></span>
+        <span class="f-caption">Приём идёт в этой вкладке. Её можно свернуть, но не закрывать.</span>
+      </footer>
+
+    </div>
+  </div>
+</main>
+
+<script src="../assets/fixtures.js"></script>
+<script src="../assets/ferry.js"></script>
+<script>
+(function () {
+  var V = FerryData.VOLUME;
+
+  function pathCard(id, active, title, tag, text, seed, seedOk) {
+    return {
+      cls: active ? 'f-note--signal' : '',
+      title: title, tag: tag, text: text,
+      seed: seed, seedClass: seedOk ? 'f-caption--ok' : 'f-caption--warn'
+    };
+  }
+
+  function base() {
+    return {
+      volName: V.name,
+      size: V.size + ' ' + V.sizeUnit,
+      files: V.filesHuman,
+      chunk: V.chunkSize + ' · ' + V.chunksHuman + ' шт'
+    };
+  }
+
+  function fsa() {
+    var m = base();
+    m.stampWord = 'прямая запись'; m.stampSub = 'путь A'; m.stampClass = 'f-stamp--ok';
+    m.space = [
+      { k: 'нужно всего', v: '12,4 ГиБ', cls: '' },
+      { k: 'временно', v: 'не нужно', cls: '' },
+      { k: 'свободно на диске', v: '214 ГБ', cls: 'f-fact__v--ok' }
+    ];
+    m.spaceNote = 'Браузер умеет писать прямо в конечную папку, поэтому второй копии не потребуется.';
+    m.spaceNoteClass = '';
+    m.paths = [
+      pathCard('a', true, 'Прямо в папку на диске', 'путь A · File System Access',
+        'Приём идёт сразу в конечное дерево файлов, с произвольным доступом: две волны работают, докачка настоящая.',
+        'Раздавать другим сможете: байты лежат на диске и читаются обратно.', true),
+      pathCard('b', false, 'Через приватное хранилище браузера', 'путь B · OPFS',
+        'Нужно вдвое больше места: сначала том собирается в приватном хранилище, потом выгружается наружу одним файлом.',
+        'Раздавать другим сможете, но диск займётся дважды.', true),
+      pathCard('c', false, 'Потоком в менеджер загрузок', 'путь C · фоллбэк',
+        'Только по порядку, от первого чанка к последнему. Две волны недоступны.',
+        'Раздавать другим не получится: байты уходят в менеджер загрузок.', false)
+    ];
+    m.picker = 'Выбрать папку…';
+    m.pickerNote = 'откроется системный диалог выбора папки';
+    m.dest = '~/Downloads/sirius-raw-2026-09/';
+    m.mode = 'дерево файлов на диске';
+    m.canSeed = 'да';
+    m.canSeedClass = 'f-fact__v--ok';
+    m.resume = 'да, по битовой карте чанков';
+    m.resumeClass = 'f-fact__v--ok';
+    return m;
+  }
+
+  function opfs() {
+    var m = base();
+    m.stampWord = 'через хранилище'; m.stampSub = 'путь B'; m.stampClass = 'f-stamp--wait';
+    m.space = [
+      { k: 'нужно всего', v: '27,2 ГБ', cls: '' },
+      { k: 'временно', v: '13,6 ГБ', cls: '' },
+      { k: 'свободно на диске', v: '46 ГБ', cls: 'f-fact__v--ok' }
+    ];
+    m.spaceNote = 'Ваш браузер не умеет писать папку напрямую: том собирается в приватном хранилище, а в конце отдаётся одним ZIP без сжатия. Место занимается дважды и освобождается сразу после выгрузки.';
+    m.spaceNoteClass = '';
+    m.paths = [
+      pathCard('a', false, 'Прямо в папку на диске', 'путь A · File System Access',
+        'Ваш браузер этого не умеет — доступно в Chrome и Edge.',
+        'Был бы лучший вариант: без второй копии на диске.', true),
+      pathCard('b', true, 'Через приватное хранилище браузера', 'путь B · OPFS',
+        'Произвольный доступ есть, поэтому две волны и докачка работают. В конце — ZIP без сжатия (store, zip64).',
+        'Раздавать другим сможете: чанки читаются из хранилища.', true),
+      pathCard('c', false, 'Потоком в менеджер загрузок', 'путь C · фоллбэк',
+        'Понадобится, если место на диске кончится.',
+        'Раздавать другим не получится.', false)
+    ];
+    m.picker = 'Выбрать, куда выгрузить архив…';
+    m.pickerNote = 'файл появится в загрузках после сборки';
+    m.dest = '~/Downloads/sirius-raw-2026-09.zip';
+    m.mode = 'ZIP без сжатия (store, zip64)';
+    m.canSeed = 'да';
+    m.canSeedClass = 'f-fact__v--ok';
+    m.resume = 'да, по битовой карте чанков';
+    m.resumeClass = 'f-fact__v--ok';
+    return m;
+  }
+
+  function nospace() {
+    var m = base();
+    m.stampWord = 'последовательно'; m.stampSub = 'путь C'; m.stampClass = 'f-stamp--warn';
+    m.space = [
+      { k: 'нужно всего', v: '27,2 ГБ', cls: '' },
+      { k: 'временно', v: '13,6 ГБ', cls: '' },
+      { k: 'свободно на диске', v: '9,4 ГБ', cls: 'f-fact__v--warn' }
+    ];
+    m.spaceNote = 'Свободного меньше, чем нужно под временное хранилище, поэтому включён последовательный режим: байты уходят сразу в менеджер загрузок. Это честная плата, а не поломка.';
+    m.spaceNoteClass = 'f-caption--warn';
+    m.paths = [
+      pathCard('a', false, 'Прямо в папку на диске', 'путь A · File System Access',
+        'Ваш браузер этого не умеет — доступно в Chrome и Edge.',
+        'Был бы лучший вариант: без второй копии на диске.', true),
+      pathCard('b', false, 'Через приватное хранилище браузера', 'путь B · OPFS',
+        'Недоступен: нужно 13,6 ГБ под временное хранилище, свободно 9,4 ГБ.',
+        'Освободите 18 ГБ — и путь B включится сам.', false),
+      pathCard('c', true, 'Потоком в менеджер загрузок', 'путь C · включён',
+        'Только по порядку, от первого чанка к последнему: две волны недоступны, при обрыве приём начнётся заново.',
+        'Раздавать другим не получится: байты уходят в менеджер загрузок и обратно не читаются.', false)
+    ];
+    m.picker = 'Проверить место ещё раз';
+    m.pickerNote = 'после освобождения места включится путь B';
+    m.dest = 'менеджер загрузок браузера';
+    m.mode = 'последовательный поток через Service Worker';
+    m.canSeed = 'нет';
+    m.canSeedClass = 'f-fact__v--warn';
+    m.resume = 'нет, приём начнётся заново';
+    m.resumeClass = 'f-fact__v--warn';
+    return m;
+  }
+
+  Ferry.screen({
+    title: 'R2 · куда сохранить',
+    tickMs: 0,
+    scenarios: [
+      { key: 'fsa', label: 'Chrome · путь A', build: fsa, live: false },
+      { key: 'opfs', label: 'Safari · путь B', build: opfs, live: false },
+      { key: 'nospace', label: 'мало места · путь C', build: nospace, live: false }
+    ]
+  });
+})();
+</script>
+</body>
+</html>

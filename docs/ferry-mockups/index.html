@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry · макеты интерфейса</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="assets/ferry.css">
+<style>
+  .idx__row { display: flex; align-items: baseline; gap: var(--space-4); padding: 10px 0; border-bottom: var(--hairline) solid var(--line-100); text-decoration: none; color: inherit; }
+  .idx__row:hover { background: var(--surface-200); }
+  .idx__code { width: 64px; flex-shrink: 0; font: var(--text-mono-m); color: var(--signal-text); }
+  .idx__name { width: 240px; flex-shrink: 0; font: var(--text-body-strong); }
+  .idx__what { flex-grow: 1; font: var(--text-caption); color: var(--ink-200); }
+  .idx__scen { width: 280px; flex-shrink: 0; font: var(--text-mono-s); color: var(--ink-300); text-align: right; }
+  @media (max-width: 900px) {
+    .idx__row { flex-wrap: wrap; gap: var(--space-2); }
+    .idx__name, .idx__scen { width: auto; text-align: left; }
+  }
+</style>
+</head>
+<body>
+
+<div class="f-proto" data-proto></div>
+
+<main class="f-page" data-screen>
+  <div class="f-page__inner">
+    <div class="f-sheet">
+
+      <header class="f-sheet__head">
+        <div class="f-brand">
+          <span class="f-brand__name">Ferry</span>
+          <span class="f-brand__sub">макеты интерфейса · стиль «судовая накладная»</span>
+        </div>
+        <span class="f-grow"></span>
+        <div class="f-stamp">
+          <span class="f-stamp__word">фаза 0</span>
+          <span class="f-stamp__sub">скелет без бэкенда</span>
+        </div>
+      </header>
+
+      <p style="max-width: 78ch; margin: var(--space-2) 0;">
+        Одиннадцать экранов из §11 проектного документа. Данные фейковые, сети нет, ничего не шифруется —
+        это интерфейс и только он. Каждый экран переключает тему и сценарии в верхней панели;
+        панель принадлежит макету, в продукте её нет.
+      </p>
+
+      <section class="f-section">
+        <div class="f-section__head">
+          <span class="f-section__num">01</span>
+          <h2 class="f-section__name">отправитель</h2>
+          <span class="f-section__rule"></span>
+        </div>
+        <div>
+          <a class="idx__row" href="screens/s1-empty.html">
+            <span class="idx__code">S1</span>
+            <span class="idx__name">Пустой экран</span>
+            <span class="idx__what">Дропзона во весь лист, два входа — файл и папка, три обещания продукта.</span>
+            <span class="idx__scen">перетаскивание подсвечивает зону</span>
+          </a>
+          <a class="idx__row" href="screens/s2-setup.html">
+            <span class="idx__code">S2</span>
+            <span class="idx__name">Настройка раздачи</span>
+            <span class="idx__what">Сводка тома и опись, условия выдачи: использования, срок, подтверждение, пароль, работа без владельца.</span>
+            <span class="idx__scen">контролы живые, сводка пересчитывается</span>
+          </a>
+          <a class="idx__row" href="screens/s3-active.html">
+            <span class="idx__code">S3</span>
+            <span class="idx__name">Активная раздача</span>
+            <span class="idx__what">Главный экран продукта: том, поток, ссылка с QR, карта тома с курсорами, получатели, условия.</span>
+            <span class="idx__scen">трое · третий на 60 % · один · без отправителя</span>
+          </a>
+          <a class="idx__row" href="screens/s4-approval.html">
+            <span class="idx__code">S4</span>
+            <span class="idx__name">Запрос доступа</span>
+            <span class="idx__what">Модалка подтверждения: кто просится, что о нём известно, «пускать всех дальше».</span>
+            <span class="idx__scen">кнопки закрывают модалку</span>
+          </a>
+          <a class="idx__row" href="screens/s5-owner-leave.html">
+            <span class="idx__code">S5</span>
+            <span class="idx__name">Уход владельца</span>
+            <span class="idx__what">Перехват закрытия вкладки: делегирование сиду и ссылка возврата — или честное «двое не докачают».</span>
+            <span class="idx__scen">оставить работать · закрыть раздачу</span>
+          </a>
+        </div>
+      </section>
+
+      <section class="f-section">
+        <div class="f-section__head">
+          <span class="f-section__num">02</span>
+          <h2 class="f-section__name">получатель</h2>
+          <span class="f-section__rule"></span>
+        </div>
+        <div>
+          <a class="idx__row" href="screens/r1-preview.html">
+            <span class="idx__code">R1</span>
+            <span class="idx__name">Превью тома</span>
+            <span class="idx__what">Что за том, условия выдачи, опись вложения со смещениями. Расшифровка происходит до показа.</span>
+            <span class="idx__scen">папка · файл · пароль · ссылка мертва</span>
+          </a>
+          <a class="idx__row" href="screens/r2-destination.html">
+            <span class="idx__code">R2</span>
+            <span class="idx__name">Куда сохранить</span>
+            <span class="idx__what">Три пути записи, честный счёт места на диске, последствия каждого выбора.</span>
+            <span class="idx__scen">путь A · путь B · мало места</span>
+          </a>
+          <a class="idx__row" href="screens/r3-download.html">
+            <span class="idx__code">R3</span>
+            <span class="idx__name">Приём тома</span>
+            <span class="idx__what">Две волны, доли источников, своя карта тома, место выгрузки.</span>
+            <span class="idx__scen">две волны · догон по порядку · мало места</span>
+          </a>
+          <a class="idx__row" href="screens/r4-reconnect.html">
+            <span class="idx__code">R4</span>
+            <span class="idx__name">Обрыв и возобновление</span>
+            <span class="idx__what">Сколько сохранено, с какого чанка продолжим, что происходит прямо сейчас.</span>
+            <span class="idx__scen">переподключаемся · попытки кончились</span>
+          </a>
+          <a class="idx__row" href="screens/r5-done.html">
+            <span class="idx__code">R5</span>
+            <span class="idx__name">Готово</span>
+            <span class="idx__what">Отметка о доставке, подтверждение BLAKE3, тумблер «остаться и помогать раздавать».</span>
+            <span class="idx__scen">папка · архив · раздавать нельзя</span>
+          </a>
+        </div>
+      </section>
+
+      <section class="f-section f-section--grow">
+        <div class="f-section__head">
+          <span class="f-section__num">03</span>
+          <h2 class="f-section__name">общее</h2>
+          <span class="f-section__rule"></span>
+        </div>
+        <div>
+          <a class="idx__row" href="screens/errors.html">
+            <span class="idx__code">E</span>
+            <span class="idx__name">Экраны ошибок</span>
+            <span class="idx__what">Девять кодов протокола: что произошло, что делать дальше, и ни слова о вине пользователя.</span>
+            <span class="idx__scen">переключатель кода в панели макета</span>
+          </a>
+        </div>
+      </section>
+
+      <footer class="f-sheet__foot">
+        <div class="f-brand__sub">что дальше</div>
+        <span class="f-grow"></span>
+        <span class="f-caption" style="max-width: 70ch;">
+          Разметка и стили готовы к переносу: <code class="f-mono">assets/ferry.css</code> — слой компонентов,
+          <code class="f-mono">assets/ferry.js</code> — тема и сценарии, <code class="f-mono">assets/fixtures.js</code> — фейковые данные,
+          которые в фазе 1 заменяются ответами сервера. Подробности в README.md рядом.
+        </span>
+      </footer>
+
+    </div>
+  </div>
+</main>
+
+<script src="assets/ferry.js"></script>
+<script>
+  Ferry.screen({ title: 'все экраны', home: null, tickMs: 0, build: function () { return {}; } });
+</script>
+</body>
+</html>

@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry · R4 — обрыв и возобновление</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/tokens.css">
+<link rel="stylesheet" href="../assets/ferry.css">
+</head>
+<body>
+
+<div class="f-proto" data-proto></div>
+
+<main class="f-page" data-screen>
+  <div class="f-page__inner">
+    <div class="f-sheet">
+
+      <header class="f-sheet__head">
+        <div class="f-brand">
+          <span class="f-brand__name">Ferry</span>
+          <span class="f-brand__sub">квитанция приёма</span>
+        </div>
+        <span class="f-grow"></span>
+        <div class="f-id">
+          <span class="f-id__label">раздача</span>
+          <span class="f-id__value" data-f="id"></span>
+        </div>
+        <div class="f-stamp" data-class="stampClass">
+          <span class="f-stamp__word" data-f="state"></span>
+          <span class="f-stamp__sub" data-f="stampSub"></span>
+        </div>
+      </header>
+
+      <div class="f-note" data-class="noteClass">
+        <span class="f-note__dot" data-style="background:noteDot"></span>
+        <span class="f-note__text" data-f="noteText"></span>
+        <span class="f-grow"></span>
+        <button type="button" class="f-btn f-btn--sm f-btn--primary" data-f="noteAction"></button>
+      </div>
+
+      <div class="f-grid2">
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">01</span>
+            <h2 class="f-section__name">что уже принято</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <div class="f-big" style="margin: var(--space-2) 0;">
+            <span class="f-big__value">42</span>
+            <span class="f-big__unit">% сохранено на диске</span>
+          </div>
+          <div class="f-facts">
+            <div class="f-fact"><span class="f-fact__k">принято чанков</span><span class="f-fact__dots"></span><span class="f-fact__v">1 333 из 3 174</span></div>
+            <div class="f-fact"><span class="f-fact__k">все проверены BLAKE3</span><span class="f-fact__dots"></span><span class="f-fact__v f-fact__v--ok">да</span></div>
+            <div class="f-fact"><span class="f-fact__k">продолжим с чанка</span><span class="f-fact__dots"></span><span class="f-fact__v">1 333</span></div>
+            <div class="f-fact"><span class="f-fact__k">битовая карта</span><span class="f-fact__dots"></span><span class="f-fact__v">лежит рядом с файлом</span></div>
+          </div>
+        </section>
+
+        <section class="f-section">
+          <div class="f-section__head">
+            <span class="f-section__num">02</span>
+            <h2 class="f-section__name">что происходит</h2>
+            <span class="f-section__rule"></span>
+          </div>
+          <div class="f-facts" data-list="steps">
+            <template>
+              <div class="f-fact">
+                <span class="f-fact__k" data-f="k"></span>
+                <span class="f-fact__dots"></span>
+                <span class="f-fact__v" data-class="cls" data-f="v"></span>
+              </div>
+            </template>
+          </div>
+          <p class="f-caption" style="margin: var(--space-3) 0 0;" data-f="explain"></p>
+        </section>
+
+      </div>
+
+      <section class="f-section f-section--grow">
+        <div class="f-section__head">
+          <span class="f-section__num">03</span>
+          <h2 class="f-section__name">карта тома</h2>
+          <span class="f-section__rule"></span>
+          <span class="f-section__meta">принятое никуда не делось</span>
+        </div>
+        <div class="f-vmap" data-vmap="map">
+          <div class="f-vmap__frame"></div>
+          <div class="f-vmap__ruler">
+            <span>0</span><span>1,8 ГиБ</span><span>3,5 ГиБ</span><span>5,3 ГиБ</span>
+            <span>7,1 ГиБ</span><span>8,9 ГиБ</span><span>10,6 ГиБ</span><span>12,4 ГиБ</span>
+          </div>
+          <div class="f-legend">
+            <span><i style="background: var(--chunk-none)"></i>нет</span>
+            <span><i style="background: var(--chunk-inflight)"></i>в пути</span>
+            <span><i style="background: var(--chunk-have)"></i>есть</span>
+            <span><i style="background: var(--chunk-peer)"></i>от пира</span>
+          </div>
+        </div>
+      </section>
+
+      <footer class="f-sheet__foot">
+        <button type="button" class="f-btn f-btn--lg f-btn--primary" data-f="cta"></button>
+        <button type="button" class="f-btn f-btn--lg f-btn--ghost">Отменить приём</button>
+        <span class="f-grow"></span>
+        <span class="f-caption" data-f="tail"></span>
+      </footer>
+
+    </div>
+  </div>
+</main>
+
+<script src="../assets/fixtures.js"></script>
+<script src="../assets/ferry.js"></script>
+<script>
+(function () {
+  var V = FerryData.VOLUME;
+
+  var MAP = { segments: Ferry.map([[0, 0.30, 'peer'], [0.60, 0.72, 'have']]) };
+
+  function auto(t) {
+    var left = Math.max(0, 4 - (t % 6));
+    return {
+      id: V.id,
+      state: 'пауза', stampSub: 'связь потеряна', stampClass: 'f-stamp--wait',
+      noteClass: 'f-note--wait',
+      noteDot: 'var(--wait)',
+      noteText: 'Соединение потеряно. Сохранено 42 % — переподключение через ' + left + ' с, продолжим с того же чанка.',
+      noteAction: 'Продолжить сейчас',
+      steps: [
+        { k: 'попытка', v: '1 из 8', cls: '' },
+        { k: 'следующая через', v: left + ' с', cls: '' },
+        { k: 'раздача на сервере', v: 'жива', cls: 'f-fact__v--ok' },
+        { k: 'использование', v: 'не тратится заново', cls: 'f-fact__v--ok' }
+      ],
+      explain: 'Переподключение отправляет серверу список уже принятых диапазонов, и приём продолжается ровно с того места, где оборвался. Для интернета, который режут, это не опция, а базовое поведение.',
+      map: MAP,
+      cta: 'Продолжить сейчас',
+      tail: 'вкладку закрывать не нужно — прогресс уже на диске'
+    };
+  }
+
+  function manual() {
+    return {
+      id: V.id,
+      state: 'ждём вас', stampSub: 'восемь попыток подряд', stampClass: 'f-stamp--warn',
+      noteClass: 'f-note--warn',
+      noteDot: 'var(--warn)',
+      noteText: 'Восемь попыток подряд не удались — сеть недоступна. Принятые 42 % на месте, приём продолжится по вашей команде.',
+      noteAction: 'Повторить',
+      steps: [
+        { k: 'попыток сделано', v: '8 из 8', cls: 'f-fact__v--warn' },
+        { k: 'последняя ошибка', v: 'ws_close 1006', cls: '' },
+        { k: 'раздача на сервере', v: 'ещё жива, 54 мин', cls: '' },
+        { k: 'использование', v: 'не тратится заново', cls: 'f-fact__v--ok' }
+      ],
+      explain: 'Автоматические попытки прекращены, чтобы не жечь батарею и не шуметь в сети. Пока раздача жива на сервере, вы можете продолжить в любой момент — по битовой карте принятых чанков.',
+      map: MAP,
+      cta: 'Продолжить приём',
+      tail: 'если раздача погаснет раньше, чем вернётся сеть, потребуется новая ссылка'
+    };
+  }
+
+  Ferry.screen({
+    title: 'R4 · обрыв и возобновление',
+    scenarios: [
+      { key: 'auto', label: 'переподключаемся', build: auto },
+      { key: 'manual', label: 'попытки кончились', build: manual, live: false }
+    ],
+    tickMs: 1000
+  });
+})();
+</script>
+</body>
+</html>
