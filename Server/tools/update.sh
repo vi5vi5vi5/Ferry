@@ -13,6 +13,15 @@
 #  Переопределить порты хоста (с доменом HTTP_PORT переопределять нельзя):
 #    ./tools/update.sh --https-port 8443 --http-port 8081
 #
+#  Если 80 и 443 уже держит сосед (например MeetUp) — встать за его nginx:
+#    ./tools/update.sh --behind-proxy server_default
+#  Свой прокси тогда не поднимается, Ferry подключается к сети соседа, а
+#  тому кладётся готовый server-блок из proxy/ferry.conf.example.
+#
+#  Не нужен клиент под Windows — не собирать его (экономит несколько минут
+#  ПЕРВОЙ сборки; дальше стадия всё равно берётся из кэша):
+#    ./tools/update.sh --skip-windows
+#
 #  Домен, почта и порты ЗАПОМИНАЮТСЯ в .env рядом с docker-compose.yml:
 #  указали --domain один раз — дальше хватает `./tools/update.sh`.
 # ============================================================
@@ -32,8 +41,18 @@ while [[ $# -gt 0 ]]; do
         --email)      export LETSENCRYPT_EMAIL="$2"; shift 2 ;;
         --http-port)  export HTTP_PORT="$2"; shift 2 ;;
         --https-port) export HTTPS_PORT="$2"; shift 2 ;;
+        --behind-proxy)
+            if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+                echo "У --behind-proxy нужно имя docker-сети соседа." >&2
+                echo "Посмотреть: docker network ls" >&2
+                exit 1
+            fi
+            export FERRY_PROXY_NETWORK="$2"; shift 2 ;;
+        --standalone) export FERRY_PROXY_NETWORK=""; shift ;;
+        --skip-windows)  export WINDOWS_STAGE="build-client-windows-skip"; shift ;;
+        --with-windows)  export WINDOWS_STAGE="build-client-windows"; shift ;;
         -h|--help)
-            sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^#//'
+            sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^#//'
             exit 0 ;;
         *)
             echo "Неизвестный аргумент: $1" >&2
@@ -64,7 +83,7 @@ env_file_set() {
     mv "$tmp" "$ENV_FILE"
 }
 
-for var in DOMAIN LETSENCRYPT_EMAIL HTTP_PORT HTTPS_PORT; do
+for var in DOMAIN LETSENCRYPT_EMAIL HTTP_PORT HTTPS_PORT FERRY_PROXY_NETWORK WINDOWS_STAGE; do
     if [[ -n "${!var:-}" ]]; then
         env_file_set "$var" "${!var}"
     else
@@ -87,7 +106,41 @@ if [[ ! -f "$SERVER_DIR/mount/ferry.conf" ]] && [[ -f "$SERVER_DIR/mount/ferry.c
     echo "Создан mount/ferry.conf — все настройки закомментированы, работаем на умолчаниях."
 fi
 
-if [[ -n "${DOMAIN:-}" ]]; then
+# ---- Режим: сам себе прокси или за чужим ----
+#
+# Вычисляется до первого обращения к compose: от него зависит и набор
+# файлов, и профиль, и нужна ли вообще проверка портов.
+if [[ -n "${FERRY_PROXY_NETWORK:-}" ]]; then
+    BEHIND_PROXY=1
+    COMPOSE_ARGS=(-f docker-compose.yml -f docker-compose.behind-proxy.yml)
+    # Записываем в .env, чтобы голый `docker compose up -d` в этом
+    # каталоге вёл себя так же, как update.sh, а не поднимал вдруг
+    # собственный прокси на занятые порты.
+    env_file_set COMPOSE_FILE "docker-compose.yml:docker-compose.behind-proxy.yml"
+    env_file_set COMPOSE_PROFILES ""
+    export COMPOSE_PROFILES=""
+else
+    BEHIND_PROXY=0
+    COMPOSE_ARGS=(-f docker-compose.yml)
+    env_file_set COMPOSE_FILE "docker-compose.yml"
+    env_file_set COMPOSE_PROFILES "standalone"
+    export COMPOSE_PROFILES="standalone"
+fi
+
+if [[ "$BEHIND_PROXY" -eq 1 ]]; then
+    echo "Режим: за чужим nginx, сеть ${FERRY_PROXY_NETWORK}."
+    echo "  Свой прокси не поднимается; TLS и порты — забота соседа."
+    if ! docker network inspect "$FERRY_PROXY_NETWORK" >/dev/null 2>&1; then
+        echo >&2
+        echo "Но сети ${FERRY_PROXY_NETWORK} на этой машине нет." >&2
+        echo "Посмотреть, какие есть:  docker network ls" >&2
+        echo "У MeetUp это обычно server_default (имя проекта + _default)." >&2
+        exit 1
+    fi
+    if [[ -n "${DOMAIN:-}" ]]; then
+        echo "  (--domain в этом режиме не используется: сертификат выписывает сосед)"
+    fi
+elif [[ -n "${DOMAIN:-}" ]]; then
     echo "Режим TLS: Let's Encrypt для домена ${DOMAIN}"
     if [[ -z "${LETSENCRYPT_EMAIL:-}" ]]; then
         echo "  (email не задан — сертификат выпустится, но без уведомлений об истечении;"
@@ -97,6 +150,44 @@ else
     echo "Режим TLS: самоподписанный сертификат (домен не задан)."
     echo "  Клиенту понадобится --insecure, а браузер предупредит о безопасности."
     echo "  Есть домен? ./tools/update.sh --force --domain ваш-домен --email вы@почта"
+fi
+
+# ---- Осадок от старого имени проекта ----
+#
+# До появления `name: ferry` в docker-compose.yml compose брал имя проекта
+# от каталога — «server», ровно как у MeetUp. На сервере, где стоят оба,
+# запуск Ferry подменял контейнеры MeetUp своими: совпадали и имя проекта,
+# и имена сервисов. Теперь это невозможно, но контейнеры, поднятые ДО
+# исправления, могут до сих пор работать под чужим именем и держать порты.
+#
+# Ищем ровно их: образ наш, имя проекта — не наше.
+STALE="$(docker ps -a \
+    --format '{{.Names}}|{{.Image}}|{{.Label "com.docker.compose.project"}}' 2>/dev/null \
+    | awk -F'|' '$2 ~ /ferry/ && $3 != "" && $3 != "ferry" { print "  " $1 "  (проект " $3 ", образ " $2 ")" }' \
+    || true)"
+
+if [[ -n "$STALE" ]]; then
+    cat >&2 <<HINT
+На этой машине остались контейнеры Ferry, поднятые под ЧУЖИМ именем проекта:
+
+$STALE
+
+Так выглядит след старой ошибки: до исправления Ferry занимал имя проекта
+«server» и подменял собой контейнеры MeetUp. Если MeetUp перестал отвечать —
+это оно.
+
+Порядок восстановления:
+
+  1. Вернуть соседа на место (он заберёт своё имя проекта обратно):
+       cd ../../MeetUp/Server && ./tools/update.sh --force
+     Тома с сертификатами Let's Encrypt привязаны к имени проекта и никуда
+     не делись, так что сертификат переживёт это без потерь.
+
+  2. Вернуться сюда и запустить снова — теперь Ferry живёт под своим
+     именем и чужого не трогает.
+
+HINT
+    exit 1
 fi
 
 # ---- Порты: заняты ли они кем-то посторонним ----
@@ -132,7 +223,7 @@ port_owner() {
 
 OUR_CONTAINERS="$(docker compose ps -q 2>/dev/null | tr '\n' ' ' || true)"
 CONFLICT=0
-for spec in "HTTPS:${HTTPS_PORT:-443}" "HTTP:${HTTP_PORT:-80}"; do
+for spec in ${PORTS_TO_CHECK[@]+"${PORTS_TO_CHECK[@]}"}; do
     label="${spec%%:*}"
     port="${spec##*:}"
     owner="$(port_owner "$port" || true)"
@@ -149,12 +240,21 @@ if [[ "$CONFLICT" -eq 1 ]]; then
     cat >&2 <<'HINT'
 
 Так бывает, когда на сервере уже живёт другой сервис — например MeetUp.
-Дайте Ferry свои порты:
+Есть два выхода.
 
-  ./tools/update.sh --force --https-port 8443 --http-port 8081
+1. Встать ЗА его nginx — тогда у Ferry будет свой домен без порта в
+   ссылке и настоящий сертификат:
 
-Они запомнятся в .env, дальше флаги указывать не нужно, а релей будет
-отвечать по адресу https://<ip-сервера>:8443/
+     ./tools/update.sh --force --behind-proxy server_default
+
+   Соседу при этом кладётся готовый server-блок; как именно — напишем
+   после запуска.
+
+2. Взять свои порты и жить отдельно, на самоподписанном сертификате:
+
+     ./tools/update.sh --force --https-port 8443 --http-port 8081
+
+Выбранное запомнится в .env, дальше флаги указывать не нужно.
 
 HINT
     exit 1
@@ -192,29 +292,61 @@ else
 fi
 export GIT_COMMIT GIT_MODIFIED
 
+if [[ "${WINDOWS_STAGE:-}" == "build-client-windows-skip" ]]; then
+    echo "Клиент под Windows не собирается (--skip-windows)."
+    echo "  Вернуть: ./tools/update.sh --force --with-windows"
+fi
+
 echo
 echo "=== 2/3 Пересборка и перезапуск (docker compose) ==="
+echo "Первая сборка занимает несколько минут: Qt-сервер, ядро и два клиента."
+echo "Повторные — быстрые, тяжёлые стадии берутся из кэша docker."
 # up -d --build сам пересоберёт изменившиеся образы и перезапустит только
 # те контейнеры, которые поменялись. Первая сборка занимает несколько
 # минут: собирается сервер на Qt, ядро и клиент.
-docker compose up -d --build
+docker compose "${COMPOSE_ARGS[@]}" up -d --build
 
 echo
 echo "=== 3/3 Проверка ==="
-docker compose ps
+docker compose "${COMPOSE_ARGS[@]}" ps
 echo
-
-HOST_HINT="<IP-сервера>${HTTPS_PORT:+:$HTTPS_PORT}"
-if [[ -n "${DOMAIN:-}" ]]; then
-    HOST_HINT="${DOMAIN}"
-fi
 
 echo "Готово. HEAD = $NEW_REV (сборка $GIT_COMMIT$( [[ "$GIT_MODIFIED" == "1" ]] && echo ', с локальными изменениями' ))"
 echo
-echo "Релей:   https://${HOST_HINT}/"
-echo "Клиент:  curl -fsSL https://${HOST_HINT}/install.sh | sh"
-if [[ -z "${DOMAIN:-}" ]]; then
-    echo
-    echo "Сертификат самоподписанный, поэтому пока так:"
-    echo "  curl -fsSLk https://${HOST_HINT}/install.sh | sh -s -- --insecure"
+
+if [[ "$BEHIND_PROXY" -eq 1 ]]; then
+    cat <<HINT
+Ferry поднят и ждёт запросов от соседского nginx под именем ferry-app:8080.
+Снаружи он пока не виден — осталось сказать соседу, куда ходить.
+
+Один раз на стороне того сервиса, который держит 80 и 443 (у MeetUp это
+MeetUp/Server):
+
+  1. Положить server-блок и вписать в него своё имя домена:
+
+       mkdir -p proxy/extra
+       cp $SERVER_DIR/proxy/ferry.conf.example proxy/extra/ferry.conf
+       \$EDITOR proxy/extra/ferry.conf        # заменить server_name
+
+  2. Добавить это имя в сертификат и перезапустить прокси:
+
+       ./tools/update.sh --force --extra-domain <ваш-домен>
+
+Проверить, что Ferry виден изнутри сети соседа:
+
+  docker run --rm --network ${FERRY_PROXY_NETWORK} curlimages/curl -s http://ferry-app:8080/api/health
+
+HINT
+else
+    HOST_HINT="<IP-сервера>${HTTPS_PORT:+:$HTTPS_PORT}"
+    if [[ -n "${DOMAIN:-}" ]]; then
+        HOST_HINT="${DOMAIN}"
+    fi
+    echo "Релей:   https://${HOST_HINT}/"
+    echo "Клиент:  curl -fsSL https://${HOST_HINT}/install.sh | sh"
+    if [[ -z "${DOMAIN:-}" ]]; then
+        echo
+        echo "Сертификат самоподписанный, поэтому пока так:"
+        echo "  curl -fsSLk https://${HOST_HINT}/install.sh | sh -s -- --insecure"
+    fi
 fi

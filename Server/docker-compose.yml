@@ -14,6 +14,20 @@
 # В режиме с доменом HTTP_PORT переопределять нельзя: challenge всегда
 # идёт на внешний порт 80.
 
+# Имя проекта задано ЯВНО, и это не косметика.
+#
+# По умолчанию compose берёт имя от каталога, в котором лежит этот файл.
+# Каталог называется Server — ровно как у MeetUp. На сервере, где стоят
+# оба, `docker compose up` в Ferry счёл бы контейнеры MeetUp своими и
+# заменил бы их: одинаковое имя проекта, одинаковые имена сервисов
+# (app, proxy). MeetUp бы просто выключился, а понять почему — отдельный
+# вечер.
+#
+# Имя MeetUp при этом НЕ трогаем: там оно уже привязано к томам с
+# сертификатами Let's Encrypt (server_certs, server_letsencrypt), и
+# переименование проекта осиротило бы их вместе с сертификатом.
+name: ferry
+
 services:
   app:
     build:
@@ -24,6 +38,9 @@ services:
       args:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
         GIT_MODIFIED: ${GIT_MODIFIED:-0}
+        # Собирать ли клиент под Windows. Заглушка вместо настоящей стадии
+        # экономит несколько минут первой сборки; см. --skip-windows.
+        WINDOWS_STAGE: ${WINDOWS_STAGE:-build-client-windows}
     restart: unless-stopped
     volumes:
       # ЕДИНСТВЕННОЕ, что Ferry читает с диска, — ferry.conf. Данных
@@ -32,6 +49,10 @@ services:
       - ./mount:/app/mount:ro
 
   proxy:
+    # Свой TLS-терминатор нужен, только когда Ferry живёт на сервере один.
+    # Если 80 и 443 держит сосед (MeetUp), прокси не поднимается, а Ferry
+    # встаёт за чужой — см. --behind-proxy в tools/update.sh.
+    profiles: ["standalone"]
     build: proxy
     restart: unless-stopped
     ports:

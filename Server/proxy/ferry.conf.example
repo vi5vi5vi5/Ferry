@@ -1,0 +1,98 @@
+# ============================================================
+#  Ferry за общим nginx.
+#
+#  Этот файл кладётся НЕ СЮДА, а на сторону того сервиса, который держит
+#  порты 80 и 443. Для MeetUp это:
+#
+#      MeetUp/Server/proxy/extra/ferry.conf
+#
+#  Дальше: подставить своё имя домена в server_name, перезапустить прокси
+#  соседа (docker compose restart proxy) — и всё.
+#
+#  Сертификат берётся тот же, что у соседа: certbot выписывает один
+#  сертификат сразу на оба имени (см. --extra-domain в update.sh у MeetUp),
+#  и пути к нему одинаковы для обоих server-блоков.
+# ============================================================
+
+# Заголовок Connection для смены протокола. Имя переменной с префиксом
+# ferry_ — чтобы не столкнуться с такой же переменной соседа.
+map $http_upgrade $ferry_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# Встроенный DNS docker. Нужен из-за строчки ниже — см. пояснение там же.
+resolver 127.0.0.11 valid=10s ipv6=off;
+
+server {
+    listen 443 ssl;
+
+    # ЗАМЕНИТЬ на своё имя. Ровно то, что прописано в DNS и добавлено в
+    # сертификат через --extra-domain.
+    server_name fferry.ru;
+
+    # Адрес Ferry ЧЕРЕЗ ПЕРЕМЕННУЮ, а не напрямую — и это не стилистика.
+    #
+    # nginx разрешает имена из proxy_pass один раз, при загрузке конфига.
+    # Напиши здесь proxy_pass http://ferry-app:8080 — и в момент, когда
+    # контейнер Ferry выключен, nginx откажется стартовать целиком с
+    # «host not found in upstream». То есть остановленный Ferry уронил бы
+    # заодно и соседа, ради которого всё затевалось.
+    #
+    # С переменной имя разрешается на каждый запрос, через resolver выше.
+    # Ferry выключен — этот домен отвечает 502, а сосед работает как ни в
+    # чём не бывало.
+    set $ferry_upstream http://ferry-app:8080;
+
+    # Тот же сертификат, что у соседа: он выписан на оба имени сразу.
+    ssl_certificate     /etc/nginx/certs/live/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/live/privkey.pem;
+
+    # По HTTP в Ferry не загружают ничего: том едет по вебсокету, а
+    # POST /api/transfers — это пустое тело.
+    client_max_body_size 64k;
+
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+
+    # Бинарь клиента: сжимать бессмысленно, буферизовать вредно — nginx
+    # сначала сложил бы несколько мегабайт во временный файл и только
+    # потом начал отдавать.
+    location /dl/ {
+        proxy_pass $ferry_upstream;
+        proxy_set_header Host $http_host;
+        proxy_buffering off;
+        gzip off;
+    }
+
+    # Вебсокет: тот же upstream, но с апгрейдом и длинными таймаутами.
+    #
+    # Сутки, а не час: раздача живёт ровно столько, сколько запущен
+    # `ferry send`. Между чанками пауз не бывает, а вот между «ссылка
+    # создана» и «пришёл первый получатель» может пройти сколько угодно.
+    location /wsf {
+        proxy_pass $ferry_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $ferry_connection_upgrade;
+        proxy_set_header Host $http_host;
+        proxy_read_timeout 24h;
+        proxy_send_timeout 24h;
+        proxy_buffering off;
+    }
+
+    # Всё остальное: страницы, /install.sh, /install.ps1, /api.
+    #
+    # Host передаётся как $http_host, а НЕ $host: $host отдаёт имя без
+    # порта, а приложение строит по этому заголовку адрес релея для
+    # установщиков. С $host клиенту прописался бы адрес без порта.
+    location / {
+        proxy_pass $ferry_upstream;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

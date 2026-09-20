@@ -279,6 +279,11 @@ bool consoleIsTty()
     return ::isatty(STDOUT_FILENO) == 1;
 }
 
+bool consoleStdinIsTty()
+{
+    return ::isatty(STDIN_FILENO) == 1;
+}
+
 int consoleWidth()
 {
     winsize ws{};

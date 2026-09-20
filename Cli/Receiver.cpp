@@ -197,18 +197,43 @@ private:
     double m_value = 0;
 };
 
+// Согласие человека на приём тома.
+//
+// Приглашение обещает «д», и «д» обязано работать — иначе это просто
+// вранье в интерфейсе. Сложность в том, что на той стороне может быть
+// какая угодно кодировка ввода: терминал по ssh обычно отдаёт UTF-8,
+// консоль Windows — CP866, PuTTY с чужими настройками — CP1251. Одного
+// варианта мало, поэтому принимаем все три, благо байты у них не
+// пересекаются с «нет» ни в одной из кодировок.
+//
+// Всё, что не опознано как согласие, считается отказом: подтверждение
+// стоит перед записью гигабайтов на чужой диск, и «наверное, да» здесь
+// неуместно.
 bool askYesNo(const std::string &question)
 {
     std::printf("%s [д/н] ", question.c_str());
     std::fflush(stdout);
+
     char buf[16] = {};
     if (!std::fgets(buf, sizeof(buf), stdin))
         return false;
-    const char c = buf[0];
-    return c == 'y' || c == 'Y' || c == 'd' || c == 'D'
-           || (static_cast<unsigned char>(buf[0]) == 0xD0
-               && (static_cast<unsigned char>(buf[1]) == 0xB4       // д
-                   || static_cast<unsigned char>(buf[1]) == 0x94)); // Д
+
+    const auto b0 = static_cast<unsigned char>(buf[0]);
+    const auto b1 = static_cast<unsigned char>(buf[1]);
+
+    // Латиница: y (yes) и d (да) в обоих регистрах.
+    if (b0 == 'y' || b0 == 'Y' || b0 == 'd' || b0 == 'D')
+        return true;
+
+    // UTF-8: д = D0 B4, Д = D0 94.
+    if (b0 == 0xD0 && (b1 == 0xB4 || b1 == 0x94))
+        return true;
+
+    // CP1251: д = E4, Д = C4.  CP866: д = A4, Д = 84.
+    if (b0 == 0xE4 || b0 == 0xC4 || b0 == 0xA4 || b0 == 0x84)
+        return true;
+
+    return false;
 }
 
 } // namespace
@@ -384,9 +409,13 @@ int runGet(const Options &options)
     }
 
     if (!options.yes) {
-        if (!isTty()) {
+        // Смотрим на ВХОД, а не на вывод: ответ читается с клавиатуры, и
+        // перенаправленный в файл вывод спрашивать не мешает. Раньше
+        // условие стояло на выводе, и `ferry get … | tee log` отказывался
+        // спрашивать, хотя человек сидел прямо перед клавиатурой.
+        if (!platform::consoleStdinIsTty()) {
             std::fprintf(stderr,
-                         "\nВывод не в терминал, а подтверждения не было. Добавьте -y.\n");
+                         "\nПодтверждать некому: ввод не с терминала. Добавьте -y.\n");
             return 1;
         }
         std::printf("\n");

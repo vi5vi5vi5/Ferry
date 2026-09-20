@@ -3,20 +3,28 @@
 #  Ferry — релей больших файлов.
 #
 #  Контекст сборки — КОРЕНЬ репозитория (см. docker-compose.yml): образ
-#  собирает и сервер, и общее ядро, и CLI-клиент.
+#  собирает и сервер, и общее ядро, и оба CLI-клиента.
 #
-#  Три стадии сборки, и третья — та самая, ради которой всё:
+#  Стадии:
+#    build-server          сервер на Qt6 (debian bookworm, пакетный Qt)
+#    build-client          клиент под Linux (ubuntu 22.04 — см. почему ниже)
+#    build-client-windows  клиент под Windows (кросс-компиляция MinGW-w64)
+#    runtime               slim-образ: сервер, страницы и оба бинаря рядом
 #
-#    build-server  сервер на Qt6. Debian bookworm, пакетный Qt.
-#    build-client  клиент, СПЕЦИАЛЬНО на debian bullseye. Причина ниже.
-#    runtime       slim-образ: сервер, страницы и бинарь клиента рядом.
-#
-#  Зачем клиент собирается внутри образа сервера. Затем, что релей раздаёт
+#  Зачем клиенты собираются внутри образа сервера. Затем, что релей раздаёт
 #  собственный клиент: `curl -fsSL https://<релей>/install.sh | sh`. Это
 #  делает установку такой же простой, как в MeetUp (где клиент — браузер),
 #  и гарантирует, что версия клиента совпадает с версией сервера: протокол
 #  не может разъехаться по определению.
 # ============================================================
+
+# Какую стадию брать для Windows-клиента: настоящую или заглушку
+# (./tools/update.sh --skip-windows).
+#
+# Объявлено ДО первого FROM намеренно: имя стадии в `COPY --from=` docker
+# подставляет на разборе файла, и аргумент, объявленный внутри стадии,
+# туда ещё не виден — сборка падает с «invalid reference format».
+ARG WINDOWS_STAGE=build-client-windows
 
 # ---------- 1. Сервер ----------
 FROM debian:bookworm AS build-server
@@ -43,7 +51,7 @@ RUN cmake -S Server -B build-server -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DFERRY_COMMIT="${GIT_COMMIT}" -DFERRY_MODIFIED="${GIT_MODIFIED}" \
  && cmake --build build-server
 
-# ---------- 2. Клиент ----------
+# ---------- 2. Клиент под Linux ----------
 # Ubuntu 22.04, а не bookworm, и это не случайность.
 #
 # Бинарь, собранный на bookworm, требует glibc 2.36 и НЕ ЗАПУСТИТСЯ на
@@ -57,10 +65,6 @@ RUN cmake -S Server -B build-server -G Ninja -DCMAKE_BUILD_TYPE=Release \
 # что хуже, перестаёт получать исправления в OpenSSL, который мы линкуем
 # статически. 22.04 поддерживается до 2027 года и покрывает Ubuntu 22.04+,
 # Debian 12+ и всё, что новее.
-#
-# Понадобится дотянуться дальше назад — это уже не смена базового образа,
-# а полностью статическая сборка на musl (alpine). Тогда бинарь пойдёт
-# вообще везде, но за это придётся собирать OpenSSL руками.
 FROM ubuntu:22.04 AS build-client
 
 # noninteractive: иначе tzdata на ubuntu останавливает сборку вопросом
@@ -97,9 +101,14 @@ RUN mkdir -p /out/dl \
 
 # ---------- 3. Клиент под Windows ----------
 # Кросс-компиляция MinGW-w64 прямо здесь, а не на отдельной машине с
-# Visual Studio: релей обязан раздавать и ferry.exe тоже, а держать
-# ради этого вторую сборочную машину и ручную выкладку релизов — это
-# ровно то, чего мы избегали в линуксовой ветке.
+# Visual Studio: релей обязан раздавать и ferry.exe тоже, а держать ради
+# этого вторую сборочную машину и ручную выкладку релизов — это ровно то,
+# чего мы избегали в линуксовой ветке.
+#
+# Стадия тяжёлая: здесь собирается OpenSSL. Зато собирается ОДИН раз —
+# дальше её держит кэш docker, и обычное обновление сервера её не трогает.
+# Если ferry.exe не нужен совсем, есть ./tools/update.sh --skip-windows:
+# тогда BuildKit эту стадию даже не запустит.
 FROM debian:bookworm AS build-client-windows
 
 RUN apt-get update \
@@ -109,26 +118,49 @@ RUN apt-get update \
         ninja-build \
         mingw-w64 \
         perl \
-        git \
+        curl \
         ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # OpenSSL для MinGW собирается из исходников: готового пакета под эту цель
-# в Debian нет. Тег вынесен в аргумент — обновление безопасности берётся
-# его сменой и пересборкой, больше ничего делать не нужно.
+# в Debian нет. Версия вынесена в аргумент — обновление безопасности
+# берётся её сменой и пересборкой, больше ничего делать не нужно.
 #
+# ТАРБОЛЛ, А НЕ git clone. Клон даже с --depth 1 разворачивает 192 МБ
+# рабочего дерева против 53 МБ архива. На медленном канале это
+# превращается в четверть часа ожидания на ровном месте — проверено на
+# живом сервере, где этот шаг занял 841 секунду.
+#
+# Сначала GitHub, при неудаче openssl.org: зеркала бывают доступны
+# по-разному, а останавливать всю сборку из-за одного недоступного
+# хоста незачем.
+ARG OPENSSL_VERSION=3.5.8
+RUN set -eu; \
+    gh="https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"; \
+    org="https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz"; \
+    curl -fsSL --retry 3 --retry-delay 2 -o /tmp/openssl.tar.gz "$gh" \
+      || curl -fsSL --retry 3 --retry-delay 2 -o /tmp/openssl.tar.gz "$org"; \
+    mkdir -p /tmp/openssl; \
+    tar -xzf /tmp/openssl.tar.gz -C /tmp/openssl --strip-components=1; \
+    rm /tmp/openssl.tar.gz
+
 # no-shared: у клиента не должно быть рядом лежащих DLL, весь смысл в том,
-# что это один файл. no-tests и no-docs — чтобы не собирать то, что мы всё
-# равно не запустим. Ассемблер НЕ отключаем: без него AES-GCM теряет
-# AES-NI и становится в разы медленнее, а мы им шифруем весь поток.
-ARG OPENSSL_TAG=openssl-3.5.8
-RUN git clone --depth 1 --branch "${OPENSSL_TAG}" https://github.com/openssl/openssl.git /tmp/openssl \
- && cd /tmp/openssl \
- && ./Configure mingw64 no-shared no-tests no-docs \
-        --prefix=/opt/openssl-win --cross-compile-prefix=x86_64-w64-mingw32- \
- && make -j"$(nproc)" \
- && make install_sw \
- && rm -rf /tmp/openssl
+#   что это один файл.
+# no-apps: утилита командной строки openssl нам не нужна, а линкуется она
+#   статически и долго.
+# no-tests, no-docs: туда же.
+# Ассемблер НЕ отключаем: без него AES-GCM теряет AES-NI и становится в
+#   разы медленнее, а мы им шифруем весь поток.
+# install_dev вместо install_sw: ставим только заголовки и библиотеки,
+#   больше нам от OpenSSL ничего не нужно.
+RUN set -eu; \
+    cd /tmp/openssl; \
+    ./Configure mingw64 no-shared no-tests no-docs no-apps \
+        --prefix=/opt/openssl-win --openssldir=/opt/openssl-win/ssl \
+        --cross-compile-prefix=x86_64-w64-mingw32-; \
+    make -j"$(nproc)"; \
+    make install_dev; \
+    cd /; rm -rf /tmp/openssl
 
 WORKDIR /src
 COPY . .
@@ -147,6 +179,21 @@ RUN mkdir -p /out/dl \
  && cp build-win/Cli/ferry.exe /out/dl/ferry-windows-x86_64.exe \
  && cd /out/dl && sha256sum ferry-windows-x86_64.exe > SHA256SUMS.windows \
  && cat SHA256SUMS.windows
+
+# Заглушка для --skip-windows.
+FROM debian:bookworm-slim AS build-client-windows-skip
+RUN mkdir -p /out/dl && : > /out/dl/SHA256SUMS.windows
+
+# Выбор между настоящей стадией и заглушкой.
+#
+# Именно так, через FROM с подстановкой, а не через COPY --from=${ARG}:
+# имя стадии в COPY docker разбирает раньше, чем подставляет аргументы, и
+# сборка падает с «invalid reference format». А FROM аргумент понимает.
+#
+# Побочный и главный эффект: BuildKit собирает только те стадии, от
+# которых зависит цель. С заглушкой тяжёлая кросс-сборка не запускается
+# вообще, а не собирается впустую.
+FROM ${WINDOWS_STAGE} AS windows-artifacts
 
 # ---------- 4. Рантайм ----------
 FROM debian:bookworm-slim AS runtime
@@ -169,14 +216,16 @@ WORKDIR /app
 COPY --from=build-server /src/build-server/FerryServer /app/FerryServer
 COPY Server/web /app/web
 COPY --from=build-client /out/dl /app/web/dl
-COPY --from=build-client-windows /out/dl /app/web/dl
+
+COPY --from=windows-artifacts /out/dl /app/web/dl
 
 # Общий список контрольных сумм. Установщики (install.sh и install.ps1)
 # читают один и тот же файл и сверяют по нему то, что скачали: бинарь,
 # который человек сейчас запустит, — не то место, где уместно «ну и ладно».
 RUN cat /app/web/dl/SHA256SUMS.windows >> /app/web/dl/SHA256SUMS \
  && rm /app/web/dl/SHA256SUMS.windows \
- && cat /app/web/dl/SHA256SUMS
+ && cat /app/web/dl/SHA256SUMS \
+ && ls -1 /app/web/dl
 
 # HTTP и WebSocket — один порт: сервер сам опознаёт запрос на смену
 # протокола. Наружу его публикует nginx по https и wss (см. proxy/).
