@@ -15,6 +15,7 @@
 
 #include "core/Base64Url.h"
 #include "core/Chunker.h"
+#include "core/ChunkSet.h"
 #include "core/Crypto.h"
 #include "core/HashList.h"
 #include "core/Json.h"
@@ -151,6 +152,90 @@ void testChunker()
     // Размер не степень двойки приходить не должен.
     check(!ferry::planWith(100, 100000).valid(), "отвергает размер не степень двойки");
     check(!ferry::planWith(100, 1024).valid(), "отвергает слишком мелкий чанк");
+}
+
+void testChunkSet()
+{
+    using ferry::ChunkRange;
+    using ferry::ChunkSet;
+
+    section("Множество чанков");
+
+    ChunkSet s(20);
+    check(s.count() == 20 && s.empty() && !s.full(), "пустое множество на 20 чанков");
+    check(s.byteCount() == 3, "20 бит — это три байта");
+
+    check(s.set(0) && s.set(1) && s.set(2), "три чанка поставились");
+    check(!s.set(1), "повторная установка не считается изменением");
+    check(s.cardinality() == 3, "мощность считается по ходу");
+    check(s.prefix() == 3, "префикс — три");
+
+    s.set(5);
+    s.set(6);
+    s.set(19);
+    check(s.cardinality() == 6, "мощность после разрозненных чанков");
+    check(s.prefix() == 3, "дырка префикс не двигает");
+
+    const auto r = s.ranges();
+    check(r.size() == 3, "три диапазона");
+    check(r[0] == ChunkRange{0, 2} && r[1] == ChunkRange{5, 6} && r[2] == ChunkRange{19, 19},
+          "границы диапазонов включительные с обеих сторон");
+    check(r[2].size() == 1, "диапазон из одного чанка имеет размер один");
+
+    const auto miss = s.missing();
+    check(miss.size() == 2 && miss[0] == ChunkRange{3, 4} && miss[1] == ChunkRange{7, 18},
+          "недостающее — точное дополнение");
+    check(s.firstMissing() == 3 && s.firstMissing(7) == 7 && s.firstMissing(19) == 20,
+          "первый отсутствующий, в том числе за концом");
+
+    // То, ради чего тип общий: список диапазонов уезжает по проводу и
+    // обязан восстановиться байт в байт.
+    ChunkSet back(20);
+    check(back.applyRanges(r), "диапазоны применились");
+    check(back.bits() == s.bits() && back.cardinality() == s.cardinality(),
+          "круговой проход множество -> диапазоны -> множество");
+
+    // Границы: то, что пришло по сети, обязано проверяться целиком.
+    ChunkSet guard(20);
+    check(!guard.applyRanges({{0, 2}, {18, 25}}), "диапазон за концом тома отвергнут");
+    check(guard.empty(), "и при отказе ничего не применилось — всё или ничего");
+    check(!guard.applyRanges({{7, 3}}), "перевёрнутый диапазон отвергнут");
+    check(!guard.setRange({0, 20}), "setRange тоже проверяет границу");
+
+    check(s.clear(5) && !s.clear(5), "снятие бита и его идемпотентность");
+    check(s.cardinality() == 5, "мощность после снятия");
+
+    // Полнота.
+    ChunkSet whole(20);
+    check(whole.setRange({0, 19}) && whole.full() && whole.prefix() == 20,
+          "множество целиком");
+    check(whole.ranges().size() == 1 && whole.missing().empty(), "у полного нет дырок");
+
+    // Склейка: соседние диапазоны обязаны слиться, иначе карта тома,
+    // набранная по одному чанку, уедет по проводу длиной в том.
+    std::vector<ChunkRange> messy = {{4, 7}, {0, 3}, {6, 9}, {20, 20}};
+    check(ChunkSet::normalize(messy, 21), "нормализация приняла список");
+    check(messy.size() == 2 && messy[0] == ChunkRange{0, 9} && messy[1] == ChunkRange{20, 20},
+          "пересекающиеся и соседние склеились, порядок восстановлен");
+
+    std::vector<ChunkRange> bad = {{0, 3}, {5, 4}};
+    check(!ChunkSet::normalize(bad, 21), "нормализация отвергает перевёрнутый диапазон");
+    check(bad.size() == 2, "и оставляет список нетронутым");
+
+    // Хвостовой мусор в последнем байте: карта приходит с диска, а на
+    // диске бывает что угодно. Биты за пределами тома не должны
+    // посчитаться чанками, которых нет.
+    ChunkSet loaded(20);
+    const uint8_t raw[3] = {0xFF, 0x00, 0xFF};
+    check(loaded.loadBits(raw, sizeof(raw)), "карта поднялась из сырых байт");
+    check(loaded.cardinality() == 12, "хвост последнего байта погашен");
+    check(!loaded.has(20) && loaded.has(19), "за концом тома чанков нет");
+    check(!loaded.loadBits(raw, 2), "карта не той длины отвергнута");
+
+    // Пустой том — законный случай, как и в арифметике тома.
+    ChunkSet none(0);
+    check(none.empty() && !none.full() && none.ranges().empty() && none.prefix() == 0,
+          "множество на пустом томе");
 }
 
 void testHashList()
@@ -454,6 +539,7 @@ int main()
     testBlake3();
     testBase64Url();
     testChunker();
+    testChunkSet();
     testHashList();
     testCrypto();
     testJson();

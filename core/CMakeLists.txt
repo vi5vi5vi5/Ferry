@@ -72,6 +72,7 @@ endif()
 add_library(ferry-core STATIC
     Base64Url.h   Base64Url.cpp
     Chunker.h     Chunker.cpp
+    ChunkSet.h    ChunkSet.cpp
     HashList.h    HashList.cpp
     Json.h        Json.cpp
     Link.h        Link.cpp

@@ -15,6 +15,7 @@
 #include "Cli/ui/Term.h"
 #include "core/Base64Url.h"
 #include "core/Chunker.h"
+#include "core/ChunkSet.h"
 #include "core/Crypto.h"
 #include "core/HashList.h"
 #include "core/Json.h"
@@ -45,6 +46,12 @@ uint64_t readBe64(const uint8_t *p)
 // одного числа. Причина простая: в M2 приходить они будут вразнобой, и
 // формат, который придётся менять, — это формат, из-за которого чужая
 // недокачка станет несовместимой. Лучше заложить его сразу.
+//
+// Само множество бит живёт в ferry::ChunkSet — общем типе ядра. Здесь
+// остаётся только формат файла: заголовок, привязка к тому и запись на
+// диск. Разделение нужно потому, что этими же диапазонами сервер и
+// клиент разговаривают по проводу, и трактовка границ обязана быть одна
+// на всех.
 class ChunkMap
 {
 public:
@@ -53,7 +60,7 @@ public:
     {
         m_path = path;
         m_count = chunkCount;
-        m_bits.assign(size_t((chunkCount + 7) / 8), 0);
+        m_set.reset(chunkCount);
         m_chunkSize = chunkSize;
         m_total = total;
         m_root = root;
@@ -94,40 +101,20 @@ public:
             return false;
         }
 
-        const int64_t bits = platform::fileReadAt(fd, m_bits.data(), m_bits.size(), sizeof(head));
+        std::vector<uint8_t> raw(m_set.byteCount());
+        const int64_t bits = platform::fileReadAt(fd, raw.data(), raw.size(), sizeof(head));
         platform::fileClose(fd);
-        return bits == int64_t(m_bits.size());
+        return bits == int64_t(raw.size()) && m_set.loadBits(raw.data(), raw.size());
     }
 
-    bool has(uint64_t index) const
-    {
-        return index < m_count && (m_bits[size_t(index / 8)] & (1u << (index % 8))) != 0;
-    }
+    bool has(uint64_t index) const { return m_set.has(index); }
+    void set(uint64_t index) { m_set.set(index); }
 
-    void set(uint64_t index)
-    {
-        if (index < m_count)
-            m_bits[size_t(index / 8)] |= uint8_t(1u << (index % 8));
-    }
-
-    uint64_t haveCount() const
-    {
-        uint64_t n = 0;
-        for (uint64_t i = 0; i < m_count; ++i)
-            if (has(i))
-                ++n;
-        return n;
-    }
+    uint64_t haveCount() const { return m_set.cardinality(); }
 
     // Сколько чанков подряд есть с начала. В M1 этого хватает и серверу:
     // он просто ставит курсор получателя на это место.
-    uint64_t havePrefix() const
-    {
-        uint64_t n = 0;
-        while (n < m_count && has(n))
-            ++n;
-        return n;
-    }
+    uint64_t havePrefix() const { return m_set.prefix(); }
 
     bool flush() const
     {
@@ -148,10 +135,11 @@ public:
             head[24 + i] = uint8_t(m_total >> (56 - 8 * i));
         std::memcpy(head + 32, m_root.data(), 32);
 
+        const std::vector<uint8_t> &raw = m_set.bits();
         bool okWrite = platform::fileWriteAt(fd, head, sizeof(head), 0) == int64_t(sizeof(head));
         okWrite = okWrite
-                  && platform::fileWriteAt(fd, m_bits.data(), m_bits.size(), sizeof(head))
-                         == int64_t(m_bits.size());
+                  && platform::fileWriteAt(fd, raw.data(), raw.size(), sizeof(head))
+                         == int64_t(raw.size());
         // Длина карты фиксирована и известна заранее, поэтому обрезать
         // хвост не нужно: файл либо новый, либо ровно такой же.
         platform::fileClose(fd);
@@ -162,7 +150,7 @@ public:
 
 private:
     std::string m_path;
-    std::vector<uint8_t> m_bits;
+    ferry::ChunkSet m_set;
     uint64_t m_count = 0;
     uint32_t m_chunkSize = 0;
     uint64_t m_total = 0;
