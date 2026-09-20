@@ -128,6 +128,9 @@ public:
     // Сводка для отправителя: кто качает и насколько.
     QJsonObject peersJson() const;
 
+    // Разбивка источников для конкретного получателя (§8, stats).
+    QJsonObject statsJson(const ClientSession *receiver) const;
+
     void closeWith(const QString &reasonCode);
 
 signals:
@@ -166,7 +169,7 @@ private:
     //
     // Здесь же живёт коалесцирование, и оно досталось даром: чанк
     // просится один раз, а уезжает всем, кому нужен.
-    void deliverBackfillFrame(quint64 index, const QByteArray &frame);
+    void deliverBackfillFrame(quint64 index, const QByteArray &frame, bool fromPeer);
 
     // Сколько байт разрешаем держать в буфере сокета получателя, прежде чем
     // перестаём ему слать. Больше — память сервера уходит в буферы медленных
@@ -193,6 +196,11 @@ private:
 
     // Сколько помним, кто что прислал.
     static constexpr qint64 kServedByTtlMs = 30000;
+
+    // Как часто говорить получателю, откуда к нему едет. Четверть
+    // секунды: чаще глазу незачем, реже — быстрая передача успевает
+    // кончиться, не услышав ни одного сообщения.
+    static constexpr qint64 kStatsIntervalMs = 250;
 
     QByteArray m_id;
     QByteArray m_ownerToken;

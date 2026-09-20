@@ -381,7 +381,7 @@ bool TransferSession::onSenderFrame(const QByteArray &frame, QString *errorCode)
     if (m_backfillInFlight.has(index)) {
         m_backfillInFlight.clear(index);
         m_lastGrowthMs = QDateTime::currentMSecsSinceEpoch();
-        deliverBackfillFrame(index, frame);
+        deliverBackfillFrame(index, frame, false);
         pump();
         return true;
     }
@@ -462,7 +462,7 @@ bool TransferSession::onPeerFrame(ClientSession *peer, const QByteArray &frame,
     m_servedBy.insert(index, {peer, QDateTime::currentMSecsSinceEpoch()});
     m_lastGrowthMs = QDateTime::currentMSecsSinceEpoch();
 
-    deliverBackfillFrame(index, frame);
+    deliverBackfillFrame(index, frame, true);
     pump();
     return true;
 }
@@ -619,6 +619,7 @@ void TransferSession::pump()
             if (!r->have().has(r->cursor())) {
                 r->sendBinary(frame);
                 r->sent().set(r->cursor());
+                r->countFromWindow();
             }
             r->setCursor(r->cursor() + 1);
         }
@@ -653,6 +654,20 @@ void TransferSession::pump()
 
     // 3. И то, чего в окне уже нет, — отдельной полосой и с потолком.
     requestBackfill();
+
+    // 4. Разбивка по источникам — каждому своя. Здесь, а не на секундном
+    //    такте: том в двести мегабайт по локальной сети уезжает быстрее,
+    //    чем такт успевает ткнуть, и получатель так и не узнавал бы, кто
+    //    ему всё это привёз.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (ClientSession *r : std::as_const(m_receivers)) {
+        if (!r->speaks(ClientSession::FeatureRanges))
+            continue;
+        if (now - r->lastStatsMs() < kStatsIntervalMs)
+            continue;
+        r->setLastStatsMs(now);
+        r->sendJson(statsJson(r));
+    }
 }
 
 quint64 TransferSession::nextMissing(const ClientSession *receiver, quint64 from) const
@@ -702,6 +717,7 @@ void TransferSession::serveBackfillFromWindow(ClientSession *receiver)
             break;
         receiver->sendBinary(frame);
         receiver->sent().set(i);
+        receiver->countFromWindow();
         ++i;
         // Подсказка двигается ТОЛЬКО за успешной отправкой и только
         // вперёд. Без этого каждый оборот цикла слал бы одно и то же
@@ -825,7 +841,7 @@ void TransferSession::requestBackfill()
         m_backfillAskedMs = QDateTime::currentMSecsSinceEpoch();
 }
 
-void TransferSession::deliverBackfillFrame(quint64 index, const QByteArray &frame)
+void TransferSession::deliverBackfillFrame(quint64 index, const QByteArray &frame, bool fromPeer)
 {
     // Уезжает всем, кому нужен, и нигде не оседает.
     //
@@ -843,6 +859,10 @@ void TransferSession::deliverBackfillFrame(quint64 index, const QByteArray &fram
             continue;   // это ему привезёт живая волна
         r->sendBinary(frame);
         r->sent().set(index);
+        if (fromPeer)
+            r->countFromPeer();
+        else
+            r->countFromSender();
     }
 }
 
@@ -904,13 +924,43 @@ QJsonObject TransferSession::peersJson() const
         o[QStringLiteral("id")] = int(r->receiverId());
         o[QStringLiteral("name")] = r->name();
         o[QStringLiteral("progress")] = m_chunkCount ? double(done) / double(m_chunkCount) : 1.0;
-        o[QStringLiteral("role")] =
-            done >= m_chunkCount ? QStringLiteral("seed") : QStringLiteral("leech");
+        // Три роли, а не две: отправителю важно видеть разницу между тем,
+        // кто качает вместе со всеми, и тем, кто догоняет начало второй
+        // волной: второй по прогрессу выглядит отстающим, хотя на самом
+        // деле просто пришёл позже.
+        QString role = QStringLiteral("leech");
+        if (done >= m_chunkCount)
+            role = QStringLiteral("seed");
+        else if (nextMissing(r, 0) < r->cursor())
+            role = QStringLiteral("catching");
+        o[QStringLiteral("role")] = role;
         arr.append(o);
     }
     QJsonObject o;
     o[QStringLiteral("type")] = QStringLiteral("peers");
     o[QStringLiteral("receivers")] = arr;
+    return o;
+}
+
+QJsonObject TransferSession::statsJson(const ClientSession *receiver) const
+{
+    const quint64 total =
+        receiver->fromWindow() + receiver->fromPeers() + receiver->fromSender();
+
+    QJsonObject src;
+    if (total > 0) {
+        src[QStringLiteral("window")] = double(receiver->fromWindow()) / double(total);
+        src[QStringLiteral("peers")] = double(receiver->fromPeers()) / double(total);
+        src[QStringLiteral("sender")] = double(receiver->fromSender()) / double(total);
+    } else {
+        src[QStringLiteral("window")] = 0.0;
+        src[QStringLiteral("peers")] = 0.0;
+        src[QStringLiteral("sender")] = 0.0;
+    }
+
+    QJsonObject o;
+    o[QStringLiteral("type")] = QStringLiteral("stats");
+    o[QStringLiteral("src")] = src;
     return o;
 }
 

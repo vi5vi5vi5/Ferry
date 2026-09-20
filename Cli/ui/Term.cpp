@@ -203,16 +203,19 @@ std::string volumeMap(const std::vector<Seg> &segments, int cells)
         if (to > segments.size())
             to = segments.size();
 
-        Seg worst = Seg::FromSender;
+        Seg worst = Seg::Live;
         for (size_t k = from; k < to; ++k)
             worst = std::min(worst, segments[k]);
 
         switch (worst) {
+        // Шкала яркости, а не палитра: · ░ ▒ ▓ █. Цвет только подчёркивает
+        // то, что уже видно без него, — карта обязана читаться и в журнале,
+        // где цвета нет вовсе.
         case Seg::None:       out += dim();    out += "·"; out += reset(); break;
-        case Seg::Inflight:   out += warn();   out += "▒"; out += reset(); break;
-        case Seg::Have:       out += "▓"; break;
-        case Seg::FromPeer:   out += accent(); out += "█"; out += reset(); break;
-        case Seg::FromSender: out += "█"; break;
+        case Seg::Inflight:   out += warn();   out += "░"; out += reset(); break;
+        case Seg::Have:       out += "▒"; break;
+        case Seg::Backfill:   out += accent(); out += "▓"; out += reset(); break;
+        case Seg::Live:       out += "█"; break;
         }
     }
     return out;

@@ -25,6 +25,10 @@ constexpr int64_t kDrawIntervalMs = 100;
 
 void LivePanel::update(const std::vector<std::string> &lines)
 {
+    // Последнее состояние запоминаем в обоих режимах: в терминале его
+    // дорисовывает finish(), а в журнал оно печатается целиком в конце.
+    m_last = lines;
+
     if (!ferry::ui::isTty()) {
         if (lines.empty())
             return;
@@ -39,9 +43,8 @@ void LivePanel::update(const std::vector<std::string> &lines)
 
     const int64_t t = nowMs();
     if (m_lastDrawMs != 0 && t - m_lastDrawMs < kDrawIntervalMs) {
-        // Кадр придержан. Запоминаем его целиком: если следующего вызова
-        // не будет (передача кончилась ровно сейчас), его дорисует finish.
-        m_last = lines;
+        // Кадр придержан. Если следующего вызова не будет (передача
+        // кончилась ровно сейчас), его дорисует finish.
         m_dirty = true;
         return;
     }
@@ -83,7 +86,21 @@ void LivePanel::draw(const std::vector<std::string> &lines)
 
 void LivePanel::finish()
 {
-    if (m_dirty && ferry::ui::isTty())
+    // В журнал — итоговое состояние целиком, один раз.
+    //
+    // По ходу дела туда печатается одна строка раз в пятнадцать секунд:
+    // журнал, забитый миллионом строк «49,9 %», никому не нужен. А вот
+    // последний кадр нужен очень — в нём и карта тома, и разбивка по
+    // источникам, то есть ровно то, ради чего в журнал и заглядывают.
+    if (!ferry::ui::isTty()) {
+        for (const std::string &line : m_last)
+            std::printf("%s\n", line.c_str());
+        std::fflush(stdout);
+        m_last.clear();
+        return;
+    }
+
+    if (m_dirty)
         draw(m_last);
 
     if (m_cursorHidden) {

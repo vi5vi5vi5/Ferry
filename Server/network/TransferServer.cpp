@@ -415,5 +415,6 @@ void TransferServer::onTick()
         t->pump();
         if (t->sender())
             t->sender()->sendJson(t->peersJson());
+
     }
 }

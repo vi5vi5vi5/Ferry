@@ -635,6 +635,13 @@ int runGet(const Options &options)
     // подряд означает, что чинить нечего, и крутиться вечно нельзя.
     int badInARow = 0;
 
+    // Самый правый индекс, который мы видели, — граница живой волны.
+    uint64_t liveFront = 0;
+
+    // Разбивка по источникам — со слов сервера: сам получатель её знать
+    // не может. Пустая строка — сервер ещё не сказал или не умеет.
+    std::string sourceLine;
+
     uint64_t received = have;
     uint64_t ackedUpTo = map.havePrefix();
     uint64_t sentHaveCount = map.set().cardinality();
@@ -669,6 +676,16 @@ int runGet(const Options &options)
                 if (type == "error") {
                     failed = true;
                     failure = explainError(v["reason"].toString());
+                } else if (type == "stats") {
+                    const json::Value &src = v["src"];
+                    const double w = src["window"].toDouble(0);
+                    const double p = src["peers"].toDouble(0);
+                    const double snd = src["sender"].toDouble(0);
+                    if (w + p + snd > 0) {
+                        sourceLine = std::string("источник окно ") + percent(w)
+                                     + "   пиры " + percent(p) + "   отправитель "
+                                     + percent(snd);
+                    }
                 } else if (type == "serve") {
                     // Сервер просит отдать чанки обратно — их ждёт
                     // кто-то, кто пришёл позже нас.
@@ -763,7 +780,19 @@ int runGet(const Options &options)
             }
 
             map.set(index);
-            segments[size_t(index)] = Seg::FromSender;
+
+            // Какой волной приехал чанк. Получателю этого никто не говорит и
+            // говорить не должен: фрейм из окна и фрейм от пира одинаковы
+            // до байта, и именно поэтому веер на сервере не копирует
+            // полезную нагрузку. Зато волна видна по порядку: живой поток идёт
+            // вперёд по тому, а всё, что пришло ПОЗАДИ уже виденного, —
+            // это вторая волна.
+            if (index >= liveFront) {
+                liveFront = index;
+                segments[size_t(index)] = Seg::Live;
+            } else {
+                segments[size_t(index)] = Seg::Backfill;
+            }
             ++received;
             meter.add(plainChunk.size());
         }
@@ -838,7 +867,7 @@ int runGet(const Options &options)
         const double remaining = double(plan.totalBytes) * (1.0 - frac);
         const int64_t eta = meter.value() > 1 ? int64_t(remaining / meter.value() * 1000) : -1;
 
-        panel.update({
+        std::vector<std::string> panelLines = {
             std::string("принято  ") + bar(frac, std::max(10, cells - 40)) + "  " + percent(frac)
                 + "  " + bytes(uint64_t(double(plan.totalBytes) * frac)) + " из "
                 + bytes(plan.totalBytes),
@@ -848,7 +877,10 @@ int runGet(const Options &options)
                                       + bytes(servedChunks * uint64_t(plan.chunkSize)) + reset()
                                 : std::string()),
             std::string("карта    ") + volumeMap(segments, std::max(20, cells - 12)),
-        });
+        };
+        if (!sourceLine.empty())
+            panelLines.push_back(std::string(dim()) + sourceLine + reset());
+        panel.update(panelLines);
     }
 
     panel.finish();

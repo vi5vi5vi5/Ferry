@@ -559,7 +559,14 @@ int runSend(const Options &options, const Relay &relay)
             lines.push_back(std::string(dim()) + "получатели:" + reset());
             for (const PeerRow &p : peers) {
                 const std::string who = p.name.empty() ? ("гость " + std::to_string(p.id)) : p.name;
-                const std::string role = p.role == "seed" ? "готово" : "качает";
+                // «Догоняет» стоит отдельного слова: такой получатель по процентам
+                // выглядит отстающим, хотя на самом деле просто пришёл позже и
+                // тянет начало второй волной.
+                std::string role = "качает";
+                if (p.role == "seed")
+                    role = "готово";
+                else if (p.role == "catching")
+                    role = "догоняет";
                 lines.push_back("  " + field(who, "", 18) + bar(p.progress, 20) + "  "
                                 + percent(p.progress) + "  " + role);
             }

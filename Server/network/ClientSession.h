@@ -121,6 +121,22 @@ public:
     int backfillStrikes() const { return m_backfillStrikes; }
     void addBackfillStrike() { ++m_backfillStrikes; }
 
+    // Сколько чанков этот получатель взял из каждого источника.
+    //
+    // Сам он этого знать не может: фрейм из окна и фрейм от пира
+    // одинаковы до байта. Зато именно эти три числа отвечают на вопрос,
+    // работает ли обещание продукта, и уезжают получателю в stats.
+    void countFromWindow() { ++m_fromWindow; }
+    void countFromPeer() { ++m_fromPeers; }
+    void countFromSender() { ++m_fromSender; }
+    quint64 fromWindow() const { return m_fromWindow; }
+    quint64 fromPeers() const { return m_fromPeers; }
+    quint64 fromSender() const { return m_fromSender; }
+
+    // Когда этому получателю последний раз отправляли stats.
+    qint64 lastStatsMs() const { return m_lastStatsMs; }
+    void setLastStatsMs(qint64 t) { m_lastStatsMs = t; }
+
     quint64 windowHint() const { return m_windowHint; }
     void setWindowHint(quint64 h) { m_windowHint = h; }
     quint64 backfillHint() const { return m_backfillHint; }
@@ -161,6 +177,10 @@ private:
     quint64 m_acked = 0;
     quint32 m_features = 0;
     int m_backfillStrikes = 0;
+    quint64 m_fromWindow = 0;
+    quint64 m_fromPeers = 0;
+    quint64 m_fromSender = 0;
+    qint64 m_lastStatsMs = 0;
     quint64 m_windowHint = 0;
     quint64 m_backfillHint = 0;
     ferry::ChunkSet m_have;
