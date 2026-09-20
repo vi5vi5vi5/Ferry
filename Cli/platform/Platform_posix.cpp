@@ -190,6 +190,16 @@ bool waitSocket(Socket s, bool forRead, bool forWrite, int timeoutMs, bool *read
     return true;
 }
 
+std::vector<std::string> systemRootCertificates()
+{
+    // Пусто — и это правильный ответ, а не заглушка. На Linux корни лежат
+    // там, где их ищет сам OpenSSL (/etc/ssl/certs и его собратья по
+    // дистрибутивам), и пересобирать этот список руками значило бы
+    // разойтись с системным доверием: отозванный корень остался бы
+    // отозванным только в системе, но не у нас.
+    return {};
+}
+
 // ---------- файлы ----------
 
 File fileOpenRead(const std::string &path)

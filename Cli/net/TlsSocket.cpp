@@ -1,9 +1,11 @@
 #include "Cli/net/TlsSocket.h"
 
 #include <cstring>
+#include <vector>
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
 namespace ferry::net {
@@ -33,6 +35,56 @@ void initOpenSsl()
         SSL_load_error_strings();
         done = true;
     }
+}
+
+// Откуда контекст берёт доверие.
+//
+// Linux отдаёт пустой список, и тогда работает штатный путь OpenSSL: он
+// сам знает, где у системы лежат корни, и пересобирать за него этот список
+// значило бы разойтись с системным доверием.
+//
+// Windows отдаёт список настоящий, потому что взять его больше негде.
+// Статический OpenSSL носит в себе путь, по которому его собирали, — это
+// каталог внутри докер-образа, и на машине пользователя его нет. Без этой
+// ветки клиент под Windows отвергает ЛЮБОЙ сертификат, в том числе
+// безупречный: домен открывается в браузере, а ferry говорит про
+// «unable to get local issuer certificate», и человек идёт ставить
+// --insecure на ровном месте.
+bool loadTrustAnchors(SSL_CTX *ctx, std::string *err)
+{
+    const std::vector<std::string> roots = platform::systemRootCertificates();
+
+    if (roots.empty()) {
+        if (SSL_CTX_set_default_verify_paths(ctx) != 1) {
+            if (err)
+                *err = "не найдено хранилище корневых сертификатов системы";
+            return false;
+        }
+        return true;
+    }
+
+    X509_STORE *store = SSL_CTX_get_cert_store(ctx);
+    size_t added = 0;
+    for (const std::string &der : roots) {
+        const auto *p = reinterpret_cast<const unsigned char *>(der.data());
+        X509 *cert = d2i_X509(nullptr, &p, long(der.size()));
+        if (!cert)
+            continue;   // системное хранилище хранит всякое; молча мимо
+        if (X509_STORE_add_cert(store, cert) == 1)
+            ++added;
+        X509_free(cert);
+    }
+    // Дубликаты и негодные записи складывают ошибки в очередь OpenSSL.
+    // Очередь общая на поток: не вычистив её, мы показали бы эти ошибки
+    // человеку при следующем настоящем сбое, и они увели бы в сторону.
+    ERR_clear_error();
+
+    if (added == 0) {
+        if (err)
+            *err = "в системном хранилище не нашлось ни одного корневого сертификата";
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -66,11 +118,8 @@ bool TlsSocket::doHandshake(const std::string &host, bool insecure, int timeoutM
         SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
     } else {
         SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
-        if (SSL_CTX_set_default_verify_paths(ctx) != 1) {
-            if (err)
-                *err = "не найдено хранилище корневых сертификатов системы";
+        if (!loadTrustAnchors(ctx, err))
             return false;
-        }
     }
 
     SSL *ssl = SSL_new(ctx);
@@ -203,6 +252,14 @@ int TlsSocket::read(void *buf, size_t len)
         m_error = opensslError();
         return -1;
     }
+}
+
+size_t TlsSocket::pending() const
+{
+    if (!m_tls || !m_ssl)
+        return 0;
+    const int n = SSL_pending(static_cast<SSL *>(m_ssl));
+    return n > 0 ? size_t(n) : 0;
 }
 
 int TlsSocket::write(const void *buf, size_t len)

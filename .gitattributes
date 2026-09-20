@@ -1,0 +1,34 @@
+# Переносы строк.
+#
+# У windows-машины core.autocrlf обычно true, и это нормально: в репозиторий
+# всё равно ложится LF. Опасность в другом — файл из рабочего каталога может
+# попасть на linux в обход git: docker build с windows-машины, scp, копия
+# через облачную папку. Скрипт с CRLF на сервере падает с загадочным
+# "\r: command not found", а install.sh раздаётся ещё и по http, то есть
+# сломается уже у пользователя, а не у нас.
+#
+# Поэтому всему, что читает linux, CRLF запрещён на обоих концах: и в
+# репозитории, и в рабочем каталоге.
+
+* text=auto
+
+*.sh            text eol=lf
+*.conf          text eol=lf
+*.conf.example  text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+Dockerfile      text eol=lf
+*.dockerignore  text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+
+# Веб-каталог целиком уезжает в образ и раздаётся клиентам как есть.
+Server/web/**   text eol=lf
+
+# Двоичное — не трогать. Сейчас такого в репозитории нет, но появится.
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.exe   binary

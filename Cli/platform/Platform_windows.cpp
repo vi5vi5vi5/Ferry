@@ -19,6 +19,7 @@
 
 #include <io.h>
 #include <shellapi.h>
+#include <wincrypt.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -348,6 +349,36 @@ bool waitSocket(Socket s, bool forRead, bool forWrite, int timeoutMs, bool *read
     if (writable)
         *writable = (forWrite && FD_ISSET(native, &writeSet)) || failed;
     return true;
+}
+
+std::vector<std::string> systemRootCertificates()
+{
+    std::vector<std::string> out;
+
+    // Два хранилища, а не одно. ROOT — это корни: то, чем в итоге
+    // заканчивается любая цепочка. CA — промежуточные; они нужны потому,
+    // что не всякий сервер присылает свою цепочку целиком, и без них
+    // проверка спотыкается на «нет локально доверенного сертификата»,
+    // хотя доверять на самом деле есть чему.
+    //
+    // CertOpenSystemStoreW, а не CertOpenStore с CERT_SYSTEM_STORE_*:
+    // системное хранилище пользователя уже включает в себя машинное,
+    // то есть и корпоративные корни, розданные политиками, тоже попадут.
+    for (const wchar_t *name : {L"ROOT", L"CA"}) {
+        const HCERTSTORE store = ::CertOpenSystemStoreW(0, name);
+        if (!store)
+            continue;
+        PCCERT_CONTEXT ctx = nullptr;
+        while ((ctx = ::CertEnumCertificatesInStore(store, ctx)) != nullptr) {
+            if (ctx->pbCertEncoded && ctx->cbCertEncoded > 0)
+                out.emplace_back(reinterpret_cast<const char *>(ctx->pbCertEncoded),
+                                 size_t(ctx->cbCertEncoded));
+        }
+        // Второй аргумент 0: закрыть, даже если кто-то ещё держит ссылки.
+        // Их не держит никто — контексты мы скопировали в строки.
+        ::CertCloseStore(store, 0);
+    }
+    return out;
 }
 
 // ------------------------------------------------------------------

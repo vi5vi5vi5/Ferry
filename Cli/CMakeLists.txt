@@ -44,10 +44,12 @@ target_include_directories(ferry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 target_link_libraries(ferry PRIVATE ferry-core ferry-crypto ferry-qrcodegen)
 
-# Windows: сокеты (ws2_32) и разбор командной строки в UTF-16 (shell32).
-# Обе библиотеки системные, ничего ставить не нужно.
+# Windows: сокеты (ws2_32), разбор командной строки в UTF-16 (shell32) и
+# системное хранилище сертификатов (crypt32) — без последнего статический
+# OpenSSL не находит ни одного корня и не верит ни одному сертификату.
+# Все три библиотеки системные, ставить ничего не нужно.
 if(WIN32)
-    target_link_libraries(ferry PRIVATE ws2_32 shell32)
+    target_link_libraries(ferry PRIVATE ws2_32 shell32 crypt32)
 endif()
 
 # TLS ещё и в самом клиенте (рукопожатие WebSocket) — помимо криптографии

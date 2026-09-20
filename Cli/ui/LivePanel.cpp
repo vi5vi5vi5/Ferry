@@ -16,6 +16,11 @@ int64_t nowMs()
 // Как часто печатать строку состояния, когда вывод не в терминал.
 constexpr int64_t kPlainIntervalMs = 15000;
 
+// Как часто перерисовывать панель в терминале. Сто миллисекунд — это
+// десять кадров в секунду: глазу достаточно, а главному циклу остаётся
+// заниматься своим делом.
+constexpr int64_t kDrawIntervalMs = 100;
+
 } // namespace
 
 void LivePanel::update(const std::vector<std::string> &lines)
@@ -32,6 +37,20 @@ void LivePanel::update(const std::vector<std::string> &lines)
         return;
     }
 
+    const int64_t t = nowMs();
+    if (m_lastDrawMs != 0 && t - m_lastDrawMs < kDrawIntervalMs) {
+        // Кадр придержан. Запоминаем его целиком: если следующего вызова
+        // не будет (передача кончилась ровно сейчас), его дорисует finish.
+        m_last = lines;
+        m_dirty = true;
+        return;
+    }
+    m_lastDrawMs = t;
+    draw(lines);
+}
+
+void LivePanel::draw(const std::vector<std::string> &lines)
+{
     if (!m_cursorHidden) {
         std::printf("\033[?25l");   // курсор мешает читать перерисовку
         m_cursorHidden = true;
@@ -58,11 +77,15 @@ void LivePanel::update(const std::vector<std::string> &lines)
     }
 
     m_printed = drawn;
+    m_dirty = false;
     std::fflush(stdout);
 }
 
 void LivePanel::finish()
 {
+    if (m_dirty && ferry::ui::isTty())
+        draw(m_last);
+
     if (m_cursorHidden) {
         std::printf("\033[?25h");
         m_cursorHidden = false;

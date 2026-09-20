@@ -63,6 +63,10 @@ private:
     // верить в это нельзя: сервер мог оказаться не тем.
     static constexpr size_t kMaxFrame = 64u * 1024u * 1024u;
 
+    // Сколько байт за один оборот pump() забираем из сокета, прежде чем
+    // вернуть управление наверх. См. комментарий в pump().
+    static constexpr size_t kDrainBudget = 8u * 1024u * 1024u;
+
     TlsSocket m_socket;
     std::string m_in;
     std::deque<std::string> m_out;
