@@ -187,6 +187,28 @@ void testChunkSet()
           "недостающее — точное дополнение");
     check(s.firstMissing() == 3 && s.firstMissing(7) == 7 && s.firstMissing(19) == 20,
           "первый отсутствующий, в том числе за концом");
+    check(s.firstPresent() == 0 && s.firstPresent(3) == 5 && s.firstPresent(7) == 19
+              && s.firstPresent(20) == 20,
+          "первый присутствующий — им отправитель разбирает очередь");
+
+    // Очередь отправителя разбирается именно так: нашли первый, отдали,
+    // сняли бит, пошли дальше с того же места. Порядок обязан быть
+    // возрастающим, иначе получатель не сможет писать подряд.
+    {
+        ChunkSet queue(20);
+        queue.setRange({5, 6});
+        queue.setRange({12, 12});
+        std::vector<uint64_t> drained;
+        uint64_t hint = 0;
+        while (!queue.empty()) {
+            const uint64_t i = queue.firstPresent(hint);
+            drained.push_back(i);
+            hint = i;
+            queue.clear(i);
+        }
+        const std::vector<uint64_t> expect = {5, 6, 12};
+        check(drained == expect, "очередь разбирается по возрастанию и до конца");
+    }
 
     // То, ради чего тип общий: список диапазонов уезжает по проводу и
     // обязан восстановиться байт в байт.

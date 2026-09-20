@@ -2,10 +2,12 @@
 
 #include <QByteArray>
 #include <QJsonObject>
+#include <QHash>
 #include <QList>
 #include <QObject>
 #include <QString>
 
+#include "core/ChunkSet.h"
 #include "core/RingWindow.h"
 
 class ClientSession;
@@ -96,6 +98,19 @@ public:
     bool onReceiverHave(ClientSession *receiver, const QJsonObject &msg);
     bool onReceiverRequest(ClientSession *receiver, const QJsonObject &msg);
 
+    // Чанк не сошёлся у получателя. Не ошибка протокола и не повод
+    // кого-то отключать: сервер ключа не знает и проверить, кто прав,
+    // не может. Всё, что он делает сейчас, — забывает, что этот индекс
+    // уже ехал, и просит его заново. Чёрный список источников — M2.2,
+    // вместе с теми самыми источниками.
+    void onBadChunk(ClientSession *receiver, quint64 index, const QString &reason);
+
+    // Бинарный фрейм от ПОЛУЧАТЕЛЯ — ответ на serve.
+    bool onPeerFrame(ClientSession *peer, const QByteArray &frame, QString *errorCode);
+
+    // Умеет ли сервер звать этого получателя в источники.
+    static bool canSeed(const ClientSession *receiver);
+
     // Сторожевой такт раз в секунду.
     //
     // Нужен из-за одного неприятного свойства схемы «pull с кредитом»:
@@ -123,6 +138,36 @@ private:
     quint64 slowestCursor() const;
     void broadcastToReceivers(const QJsonObject &obj);
 
+    // ---- вторая волна (M2.1) ----
+
+    // Чего получателю не хватает, начиная с from. m_chunkCount — всё есть.
+    //
+    // Не просто дополнение have: если получатель сказал request, мы
+    // уважаем его список и не навязываем то, чего он не просил.
+    quint64 nextMissing(const ClientSession *receiver, quint64 from) const;
+
+    // Отдать получателю то из недостающего, что ещё лежит в окне.
+    // Это источник № 1 из §6 и самый дешёвый: никуда ходить не надо.
+    void serveBackfillFromWindow(ClientSession *receiver);
+
+    // Попросить то, чего в окне уже нет, — у пира (источник № 2) или, если
+    // не у кого, у отправителя (№ 3). Порядок важен: аплоад пира и
+    // так простаивает, а отправителю каждый чанк стоит чтения с диска
+    // и его собственного канала, который мы и обещали не тратить дважды.
+    void requestBackfill();
+
+    // Кто из получателей может отдать этот чанк. nullptr — никто.
+    ClientSession *pickPeerFor(quint64 index, const ClientSession *forWhom) const;
+
+    // Забыть просьбы второй волны, на которые не ответили.
+    void forgetStalledBackfill(qint64 nowMs);
+
+    // Раздать пришедший вне окна чанк тем, кто его ждёт.
+    //
+    // Здесь же живёт коалесцирование, и оно досталось даром: чанк
+    // просится один раз, а уезжает всем, кому нужен.
+    void deliverBackfillFrame(quint64 index, const QByteArray &frame);
+
     // Сколько байт разрешаем держать в буфере сокета получателя, прежде чем
     // перестаём ему слать. Больше — память сервера уходит в буферы медленных
     // клиентов; меньше — на быстром канале появляются паузы между чанками.
@@ -132,6 +177,22 @@ private:
     // заведомо больше любой сетевой заминки и заведомо меньше того, за
     // что человек успевает решить, что всё сломалось.
     static constexpr qint64 kStallMs = 5000;
+
+    // Сколько чанков второй волны держим в пути одновременно.
+    //
+    // Потолок маленький нарочно. Чанк, пришедший по второй волне, не
+    // ложится в окно — он уходит сразу тем, кто его ждёт, и забывается.
+    // Значит всё, что мы попросили, обязано влезть в буферы сокетов
+    // прямо сейчас, и просить впрок нельзя.
+    static constexpr int kBackfillInFlight = 4;
+
+    // Сколько жалоб терпим, прежде чем перестать спрашивать у этого
+    // источника. Три — потому что одна жалоба бывает от случайности,
+    // три подряд — уже закономерность.
+    static constexpr int kMaxStrikes = 3;
+
+    // Сколько помним, кто что прислал.
+    static constexpr qint64 kServedByTtlMs = 30000;
 
     QByteArray m_id;
     QByteArray m_ownerToken;
@@ -161,6 +222,21 @@ private:
     qint64 m_windowCapacity = 0;
     // Докуда включительно уже попрошено у отправителя. -1 — ещё ничего.
     qint64 m_requestedUpTo = -1;
+
+    // Что попрошено второй волной и ещё не пришло, и у кого попрошено.
+    //
+    // Второе нужно не для учёта, а ради безопасности: бинарный фрейм от
+    // получателя принимается только тогда, когда мы сами попросили
+    // ИМЕННО ЕГО и ИМЕННО этот индекс. Иначе любой подключившийся
+    // смог бы подмешивать байты в чужую раздачу.
+    ferry::ChunkSet m_backfillInFlight;
+    QHash<quint64, ClientSession *> m_askedOf;   // nullptr — спросили отправителя
+    qint64 m_backfillAskedMs = 0;
+
+    // Кто прислал какой чанк — чтобы было кому записать жалобу из
+    // bad_chunk. Живёт недолго: получатель проверяет чанк сразу, а держать
+    // эту таблицу вечно значило бы хранить запись на каждый чанк тома.
+    QHash<quint64, QPair<ClientSession *, qint64>> m_servedBy;
     // Когда окно последний раз выросло. По этому времени сторож понимает,
     // что попрошенное не едет.
     qint64 m_lastGrowthMs = 0;

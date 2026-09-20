@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "Cli/ChunkPump.h"
 #include "Cli/Signals.h"
 #include "Cli/net/WebSocketClient.h"
 #include "Cli/platform/Platform.h"
@@ -15,6 +16,7 @@
 #include "Cli/ui/Term.h"
 #include "core/Base64Url.h"
 #include "core/Chunker.h"
+#include "core/ChunkSet.h"
 #include "core/Crypto.h"
 #include "core/HashList.h"
 #include "core/Json.h"
@@ -24,6 +26,10 @@
 
 namespace ferry::cli {
 namespace {
+
+// Доля догона в аплоаде отправителя — три десятых (§6).
+constexpr uint64_t kBackfillShare = 3;
+constexpr uint64_t kLiveShare = 7;
 
 int64_t nowMs()
 {
@@ -285,21 +291,54 @@ int runSend(const Options &options, const Relay &relay)
         ws.sendText(offer.dump());
     }
 
-    // Докуда включительно сервер попросил чанки. Объявлено ДО ожидания
-    // offer_ok, и это не мелочь: сервер шлёт первый need сразу за
-    // подтверждением, оба сообщения приезжают одной пачкой, и цикл
-    // ожидания обязан его сохранить, а не выбросить. Потерянный need
+    // Что сервер попросил и что мы ещё не отдали — двумя очередями.
+    //
+    // Здесь было одно число — самая правая граница просьбы, — и этого
+    // хватало, пока сервер умел просить только «дальше». Как только
+    // появляется опоздавший получатель, сервер просит НАЗАД, и монотонный
+    // курсор на такую просьбу не отвечал вообще — молча и навсегда.
+    //
+    // Очередей две, и порядок между ними строгий: сначала живая волна,
+    // потом догон. Иначе один опоздавший тянул бы начало тома впереди
+    // всех, кто качает вовремя, — ровно то, чего должен не допускать
+    // drop-behind.
+    //
+    // Объявлено ДО ожидания offer_ok, и это не мелочь: сервер шлёт первый
+    // need сразу за подтверждением, оба сообщения приезжают одной пачкой, и
+    // цикл ожидания обязан его сохранить, а не выбросить. Потерянный need
     // означает раздачу, которая вежливо стоит на нуле и ничего не говорит.
-    int64_t needUpTo = -1;
-    const auto rememberNeed = [&needUpTo](const json::Value &v) {
+    ChunkSet pendingLive(plan.chunkCount);
+    ChunkSet pendingBackfill(plan.chunkCount);
+
+    // Откуда искать следующий чанк в каждой очереди.
+    //
+    // Без подсказки пришлось бы каждый раз просматривать карту с
+    // нуля: у тома в терабайт это 32 КиБ на каждый отправленный чанк,
+    // причём почти всё — пустота позади курсора. Очередь
+    // разбирается по возрастанию, поэтому подсказка только растёт —
+    // кроме случая, когда сервер попросил назад и её надо откатить.
+    uint64_t liveHint = 0;
+    uint64_t backfillHint = 0;
+
+    const auto rememberNeed = [&](const json::Value &v) {
+        // Полоса необязательная: релей M1 о ней не знает, а всё, что он
+        // просит, — это живая волна по определению.
+        const bool backfill = v["lane"].toString("live") == "backfill";
+        ChunkSet &queue = backfill ? pendingBackfill : pendingLive;
+
         const json::Value &ranges = v["ranges"];
         for (size_t i = 0; i < ranges.size(); ++i) {
             const json::Value &r = ranges.at(i);
             if (r.size() < 2)
                 continue;
+            const int64_t from = r.at(0).toInt(-1);
             const int64_t to = r.at(1).toInt(-1);
-            if (to > needUpTo)
-                needUpTo = to;
+            if (from < 0 || to < from)
+                continue;
+            if (!queue.setRange({uint64_t(from), uint64_t(to)}))
+                continue;   // диапазон за пределами тома — мы такого не отдадим
+            uint64_t &hint = backfill ? backfillHint : liveHint;
+            hint = std::min(hint, uint64_t(from));
         }
     };
 
@@ -370,9 +409,13 @@ int runSend(const Options &options, const Relay &relay)
                 "её стоит запускать в tmux:  tmux new -s ferry%s\n\n", dim(), reset());
 
     // ---- 7. Качаем ----
-    std::vector<uint8_t> buffer(plan.chunkSize);
-    uint64_t nextToSend = 0;
+    ChunkPump pump;
+    pump.init(fd, plan, keys.data, noncePrefix.data());
+    ChunkSet sent(plan.chunkCount);
     uint64_t sentBytes = 0;
+    uint64_t sentDistinctBytes = 0;
+    uint64_t sentLiveChunks = 0;
+    uint64_t sentBackfillChunks = 0;
     std::vector<PeerRow> peers;
     RateMeter meter;
     LivePanel panel;
@@ -425,51 +468,90 @@ int runSend(const Options &options, const Relay &relay)
             break;
 
         // Шлём ровно то, что попросили, и ровно столько, сколько влезает в
-        // очередь. Читаем с диска лениво: файл целиком в память не
-        // попадает никогда, каким бы он ни был.
-        while (int64_t(nextToSend) <= needUpTo && nextToSend < plan.chunkCount
-               && ws.pendingBytes() < kOutgoingHighWater) {
-            const uint32_t len = plan.sizeOf(nextToSend);
-            const int64_t got =
-                platform::fileReadAt(fd, buffer.data(), len, plan.offsetOf(nextToSend));
-            if (got != int64_t(len)) {
+        // очередь сокета. Читаем с диска лениво: файл целиком в память не
+        // попадает никогда, каким бы большим он ни был.
+        //
+        // Живая волна идёт первой, но не вытесняет догон насовсем.
+        //
+        // Первая редакция была строгой: сначала вся живая волна, потом
+        // остатки. В обычном случае это даже лучше доли — догон едет в
+        // простое время отправителя, пока окно на сервере полно, — но есть
+        // случай, когда простоя нет вовсе: получатели быстрее нашего
+        // аплоада, окно всегда пустое, живая очередь никогда не пустеет —
+        // и опоздавший не получает ничего вообще. Поэтому доля, как в §6:
+        // догону до 30 %, группа проседает на треть, а не встаёт.
+        while (ws.pendingBytes() < kOutgoingHighWater) {
+            // Когда одна очередь пуста, вторая берёт всё.
+            bool live = !pendingLive.empty();
+            if (live && !pendingBackfill.empty()
+                && sentBackfillChunks * kLiveShare < sentLiveChunks * kBackfillShare) {
+                live = false;
+            }
+            ChunkSet &queue = live ? pendingLive : pendingBackfill;
+            if (queue.empty())
+                break;
+            uint64_t &hint = live ? liveHint : backfillHint;
+
+            // Меньший индекс вперёд — внутри каждой очереди отдельно. Для
+            // живой волны это естественный порядок тома, для догона —
+            // порядок, в котором опоздавший сможет писать подряд.
+            uint64_t index = queue.firstPresent(hint);
+            if (index >= plan.chunkCount) {
+                // Подсказка ушла дальше всего, что осталось в очереди. Очередь
+                // при этом НЕ пуста — значит искать надо с начала. Без этого
+                // шага раздача встала бы насмерть, держа неотданные чанки и
+                // не видя их.
+                index = queue.firstPresent(0);
+                if (index >= plan.chunkCount)
+                    break;
+            }
+            hint = index;
+
+            if (!pump.send(ws, index)) {
                 failed = true;
-                failure = "файл перестал читаться — его изменили или удалили во время раздачи";
+                failure = pump.error();
                 break;
             }
-
-            Bytes cipher;
-            if (!sealChunk(keys.data, noncePrefix.data(), nextToSend, plan.chunkCount,
-                           buffer.data(), size_t(len), cipher)) {
-                failed = true;
-                failure = "не удалось зашифровать чанк";
-                break;
-            }
-
-            // Заголовок внутри той же последовательности байт, что и
-            // шифротекст: сервер раздаёт фрейм получателям как есть, не
-            // копируя полезную нагрузку.
-            std::vector<uint8_t> frame(kBinaryHeaderSize + cipher.size());
-            frame[0] = OpChunk;
-            for (int i = 0; i < 8; ++i)
-                frame[1 + size_t(i)] = uint8_t(nextToSend >> (56 - 8 * i));
-            std::memcpy(frame.data() + kBinaryHeaderSize, cipher.data(), cipher.size());
-
-            ws.sendBinary(frame.data(), frame.size());
+            const uint32_t len = pump.lastPlainSize();
             meter.add(len);
+
+            // Два счётчика, и разница между ними — главное число всего
+            // проекта. sent — сколько тома мы отдали хоть раз; sentBytes —
+            // сколько байт ушло в сеть вообще. У парома второе обязано
+            // равняться первому, сколько бы ни было получателей: этим он и
+            // отличается от обычного релея.
             sentBytes += len;
-            ++nextToSend;
+            if (sent.set(index))
+                sentDistinctBytes += len;
+            if (live)
+                ++sentLiveChunks;
+            else
+                ++sentBackfillChunks;
+
+            queue.clear(index);
         }
         if (failed)
             break;
 
         // ---- панель ----
         std::vector<std::string> lines;
-        const double frac = plan.chunkCount ? double(nextToSend) / double(plan.chunkCount) : 1.0;
+        // Прогресс — по РАЗЛИЧНЫМ чанкам, а не по отправленным байтам:
+        // повторная отдача не приближает к концу и не должна двигать полоску.
+        const double frac =
+            plan.chunkCount ? double(sent.cardinality()) / double(plan.chunkCount) : 1.0;
         lines.push_back(std::string("отдано   ") + bar(frac, std::max(10, cells - 40)) + "  "
-                        + percent(frac) + "  " + bytes(sentBytes) + " из " + bytes(total));
-        lines.push_back(std::string("скорость ") + rate(meter.value()) + "   в очереди "
-                        + bytes(ws.pendingBytes()) + "   идёт " + duration(nowMs() - startedMs));
+                        + percent(frac) + "  " + bytes(sentDistinctBytes) + " из " + bytes(total));
+
+        // Повторы видны отдельной строкой и только тогда, когда они есть.
+        // Это то самое число, ради которого всё затевалось: пока оно ноль,
+        // паром везёт байт один раз, сколько бы ни было получателей.
+        std::string second = std::string("скорость ") + rate(meter.value()) + "   в очереди "
+                             + bytes(ws.pendingBytes()) + "   идёт "
+                             + duration(nowMs() - startedMs);
+        if (sentBytes > sentDistinctBytes)
+            second += std::string("   ") + warn() + "повторно "
+                      + bytes(sentBytes - sentDistinctBytes) + reset();
+        lines.push_back(std::move(second));
 
         if (peers.empty()) {
             lines.push_back(std::string(dim()) + "получателей пока нет — ссылка ждёт" + reset());
@@ -488,6 +570,24 @@ int runSend(const Options &options, const Relay &relay)
     panel.finish();
     platform::fileClose(fd);
     ws.closeGracefully();
+
+    // Итог раздачи — двумя числами, и второе важнее первого.
+    //
+    // «Отдано» — сколько тома ушло хоть раз. «Повторно» — сколько байт
+    // пришлось отдать сверх того. У парома второе обязано оставаться
+    // нулём, сколько бы ни было получателей: они берут начало тома друг у
+    // друга, а не у нас. Печатается всегда, в том числе при обрыве:
+    // именно по этой строке видно, работает обещание или нет.
+    std::printf("\n%s%s%s\n", dim(), ruleTop("итог", cells).c_str(), reset());
+    std::printf("%s│%s %s\n", dim(), reset(),
+                field("отдано", bytes(sentDistinctBytes) + " из " + bytes(total)).c_str());
+    std::printf("%s│%s %s\n", dim(), reset(),
+                field("повторно", sentBytes > sentDistinctBytes
+                                      ? bytes(sentBytes - sentDistinctBytes)
+                                      : std::string("ничего")).c_str());
+    std::printf("%s│%s %s\n", dim(), reset(),
+                field("всего в сеть", bytes(sentBytes)).c_str());
+    std::printf("%s%s%s\n", dim(), ruleBottom(cells).c_str(), reset());
 
     if (failed) {
         std::fprintf(stderr, "\n%sРаздача прервана:%s %s\n", bad(), reset(), failure.c_str());

@@ -180,6 +180,187 @@ fi
 stop_send
 
 echo
+echo "=== 9. Опоздавший: начало тома давно вытеснено из окна ==="
+# Второй релей с крошечным окном: 8 МиБ против тома в 200. Окно — буфер
+# джиттера, и чтобы это было видно в тесте, его надо сделать маленьким:
+# с окном по умолчанию том целиком влезает в оперативку, и опоздать не куда.
+mkdir -p "$WORK/late"
+printf '[log]
+level = normal
+' > "$WORK/late/ferry.conf"
+FERRY_TRANSFER_WINDOW_MB=8 $SERVER --http-port 8081 --ws-port 9001     --web-root "$WORK/late-web" --config-dir "$WORK/late" > "$WORK/late-server.log" 2>&1 &
+LATE_PID=$!
+sleep 1
+
+head -c 209715200 /dev/urandom > late.bin
+H9=$(sha256sum late.bin | cut -d' ' -f1)
+$FERRY send late.bin --relay http://localhost:8081 --no-qr > "$WORK/late-send.log" 2>&1 &
+LATE_SEND=$!
+LINK=""
+for i in $(seq 1 90); do
+    LINK=$(grep -oE 'http://localhost:8081/t/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+' "$WORK/late-send.log" | head -1 || true)
+    [ -n "$LINK" ] && break
+    sleep 1
+done
+
+if [ -z "$LINK" ]; then bad "ссылка не появилась"; else
+    # Первый забирает том ЦЕЛИКОМ и уходит. После этого в окне лежат
+    # последние восемь мегабайт, а начала тома нет ни у кого, кроме
+    # отправителя. Это и есть случай, на котором M1 отвечал no_source.
+    timeout 300 $FERRY get "$LINK" -y -o late1.out > "$WORK/late-get1.log" 2>&1
+    R1=$?
+    timeout 300 $FERRY get "$LINK" -y -o late2.out > "$WORK/late-get2.log" 2>&1
+    R2=$?
+
+    if [ $R1 -eq 0 ] && [ "$(sha256sum late1.out | cut -d' ' -f1)" = "$H9" ]; then
+        ok "первый получатель забрал том целиком"
+    else
+        bad "первый получатель не справился (код $R1)"; tail -4 "$WORK/late-get1.log"
+    fi
+
+    if grep -qi 'no_source\|нет ни отправителя' "$WORK/late-get2.log"; then
+        bad "опоздавший получил отказ no_source"
+    else
+        ok "опоздавшему не отказали"
+    fi
+    if [ $R2 -eq 0 ] && [ "$(sha256sum late2.out | cut -d' ' -f1)" = "$H9" ]; then
+        ok "опоздавший доехал второй волной, хеш сошёлся"
+    else
+        bad "опоздавший не доехал (код $R2)"; tail -6 "$WORK/late-get2.log"
+    fi
+fi
+kill $LATE_SEND 2>/dev/null || true
+kill $LATE_PID 2>/dev/null || true
+rm -f late.bin late1.out late2.out
+sleep 1
+
+echo
+echo "=== 10. Тезис: опоздавшие берут начало у сида, а не у отправителя ==="
+# Главная проверка всего M2. Тот же релей с окном в 8 МиБ.
+#
+# Первый получатель забирает том и ОСТАЁТСЯ (--seed). Двое следующих
+# приходят, когда начала тома в окне давно нет. Отправитель при этом
+# обязан отдать том ОДИН раз — это и есть обещание продукта.
+# Двое опоздавших, а не один, нарочно: так проверяется ещё и
+# коалесцирование — один чанк, нужный обоим, спрашивается один раз.
+mkdir -p "$WORK/thesis"
+printf '[log]
+level = normal
+' > "$WORK/thesis/ferry.conf"
+FERRY_TRANSFER_WINDOW_MB=8 $SERVER --http-port 8082 --ws-port 9002     --web-root "$WORK/thesis-web" --config-dir "$WORK/thesis" > "$WORK/thesis-server.log" 2>&1 &
+TH_PID=$!
+sleep 1
+
+head -c 209715200 /dev/urandom > thesis.bin
+H10=$(sha256sum thesis.bin | cut -d' ' -f1)
+$FERRY send thesis.bin --relay http://localhost:8082 --no-qr > "$WORK/thesis-send.log" 2>&1 &
+TH_SEND=$!
+LINK=""
+for i in $(seq 1 90); do
+    LINK=$(grep -oE 'http://localhost:8082/t/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+' "$WORK/thesis-send.log" | head -1 || true)
+    [ -n "$LINK" ] && break
+    sleep 1
+done
+
+if [ -z "$LINK" ]; then bad "ссылка не появилась"; else
+    # Сид: забирает том и остаётся источником.
+    timeout 300 $FERRY get "$LINK" -y --seed -o seed.out --name Сид > "$WORK/thesis-seed.log" 2>&1 &
+    SEEDER=$!
+    for i in $(seq 1 300); do
+        [ -f seed.out ] && [ "$(stat -c %s seed.out 2>/dev/null || echo 0)" = "209715200" ] && break
+        sleep 1
+    done
+    sleep 2
+
+    timeout 300 $FERRY get "$LINK" -y -o late_b.out > "$WORK/thesis-b.log" 2>&1 &
+    PB=$!
+    timeout 300 $FERRY get "$LINK" -y -o late_c.out > "$WORK/thesis-c.log" 2>&1 &
+    PC=$!
+    wait $PB; RB=$?
+    wait $PC; RC=$?
+
+    if [ $RB -eq 0 ] && [ $RC -eq 0 ]        && [ "$(sha256sum late_b.out | cut -d' ' -f1)" = "$H10" ]        && [ "$(sha256sum late_c.out | cut -d' ' -f1)" = "$H10" ]; then
+        ok "оба опоздавших забрали том целиком"
+    else
+        bad "опоздавшие не справились (коды $RB/$RC)"
+        tail -4 "$WORK/thesis-b.log"; tail -4 "$WORK/thesis-c.log"
+    fi
+
+    # Ставим точку и читаем итог отправителя.
+    kill -INT $SEEDER 2>/dev/null || true
+    kill -INT $TH_SEND 2>/dev/null || true
+    wait $TH_SEND 2>/dev/null || true
+    sleep 1
+
+    TOTAL_LINE=$(grep -a 'всего в сеть' "$WORK/thesis-send.log" | tail -1 || true)
+    REPEAT_LINE=$(grep -a 'повторно' "$WORK/thesis-send.log" | tail -1 || true)
+    echo "  $TOTAL_LINE"
+    echo "  $REPEAT_LINE"
+    if echo "$REPEAT_LINE" | grep -q 'ничего'; then
+        ok "отправитель отдал том ровно один раз — начало взяли у сида"
+    else
+        bad "отправителю пришлось досылать: $REPEAT_LINE"
+    fi
+fi
+kill $SEEDER $TH_SEND 2>/dev/null || true
+kill $TH_PID 2>/dev/null || true
+rm -f thesis.bin seed.out late_b.out late_c.out
+sleep 1
+
+echo
+echo "=== 12. Единственный сид отваливается посреди догона ==="
+# Вторая волна обязана падать назад к отправителю, а не вставать насмерть
+# с четырьмя повисшими просьбами к ушедшему.
+mkdir -p "$WORK/gone"
+printf '[log]
+level = normal
+' > "$WORK/gone/ferry.conf"
+FERRY_TRANSFER_WINDOW_MB=8 $SERVER --http-port 8083 --ws-port 9003     --web-root "$WORK/gone-web" --config-dir "$WORK/gone" > "$WORK/gone-server.log" 2>&1 &
+GONE_PID=$!
+sleep 1
+
+head -c 209715200 /dev/urandom > gone.bin
+H12=$(sha256sum gone.bin | cut -d' ' -f1)
+$FERRY send gone.bin --relay http://localhost:8083 --no-qr > "$WORK/gone-send.log" 2>&1 &
+GONE_SEND=$!
+LINK=""
+for i in $(seq 1 90); do
+    LINK=$(grep -oE 'http://localhost:8083/t/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+' "$WORK/gone-send.log" | head -1 || true)
+    [ -n "$LINK" ] && break
+    sleep 1
+done
+
+if [ -z "$LINK" ]; then bad "ссылка не появилась"; else
+    timeout 300 $FERRY get "$LINK" -y --seed -o gone_seed.out > "$WORK/gone-seed.log" 2>&1 &
+    GSEED=$!
+    # Снимаем с учёта заданий: его сейчас убьют нарочно, и «Killed» в
+    # выводе теста выглядел бы поломкой.
+    disown $GSEED 2>/dev/null || true
+    for i in $(seq 1 300); do
+        [ -f gone_seed.out ] && [ "$(stat -c %s gone_seed.out 2>/dev/null || echo 0)" = "209715200" ] && break
+        sleep 1
+    done
+    sleep 2
+
+    timeout 300 $FERRY get "$LINK" -y -o gone_late.out > "$WORK/gone-late.log" 2>&1 &
+    PL=$!
+    # Даём догону начаться — и убиваем единственный источник.
+    sleep 1
+    kill -9 $GSEED 2>/dev/null || true
+
+    wait $PL; RL=$?
+    if [ $RL -eq 0 ] && [ "$(sha256sum gone_late.out | cut -d' ' -f1)" = "$H12" ]; then
+        ok "опоздавший доехал через отправителя, когда сид исчез"
+    else
+        bad "после ухода сида догон встал (код $RL)"; tail -6 "$WORK/gone-late.log"
+    fi
+fi
+kill $GSEED $GONE_SEND 2>/dev/null || true
+kill $GONE_PID 2>/dev/null || true
+rm -f gone.bin gone_seed.out gone_late.out
+sleep 1
+
+echo
 echo "=== 8. Сервер по-прежнему ничего не хранит ==="
 curl -s localhost:8080/api/health | jq -c '{transfers, window_bytes_used, stores_on_disk}'
 echo "в веб-корне релея:"; ls -A "$WORK/web" | wc -l | sed "s/^/  файлов: /"

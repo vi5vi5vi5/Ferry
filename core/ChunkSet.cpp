@@ -164,6 +164,21 @@ uint64_t ChunkSet::firstMissing(uint64_t from) const
     return m_count;
 }
 
+uint64_t ChunkSet::firstPresent(uint64_t from) const
+{
+    uint64_t i = from;
+    while (i < m_count) {
+        if ((i & 7) == 0 && i + 8 <= m_count && m_bits[byteOf(i)] == 0) {
+            i += 8;
+            continue;
+        }
+        if (has(i))
+            return i;
+        ++i;
+    }
+    return m_count;
+}
+
 bool ChunkSet::loadBits(const uint8_t *data, size_t len)
 {
     if (!data || len != m_bits.size())

@@ -36,6 +36,7 @@ struct Options
     std::string key;
     std::string outPath;        // куда класть; пусто — рядом, по имени из манифеста
     bool yes = false;           // не спрашивать подтверждения
+    bool seed = false;          // после приёма остаться источником для остальных
 
     std::string error;          // непусто — разбор не удался
 

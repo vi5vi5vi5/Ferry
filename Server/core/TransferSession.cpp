@@ -185,6 +185,9 @@ bool TransferSession::applyOffer(const QJsonObject &msg, QString *errorCode)
     // первый же лишний байт вытеснял бы из окна начало тома.
     m_window.configure(m_chunkSize + quint32(ferry::kBinaryHeaderSize + ferry::kGcmTagSize),
                        m_windowCapacity);
+    m_backfillInFlight.reset(m_chunkCount);
+    m_askedOf.clear();
+    m_servedBy.clear();
     m_lastGrowthMs = QDateTime::currentMSecsSinceEpoch();
     m_hasOffer = true;
     m_state = State::Active;
@@ -241,6 +244,7 @@ bool TransferSession::attachReceiver(ClientSession *receiver, const QJsonObject 
     // ---- что клиент умеет и что у него уже есть ----
     receiver->setFeatures(parseFeatures(hello.value(QStringLiteral("features"))));
     receiver->have().reset(m_chunkCount);
+    receiver->sent().reset(m_chunkCount);
     receiver->wanted().reset(m_chunkCount);
 
     std::vector<ferry::ChunkRange> haveRanges;
@@ -264,20 +268,33 @@ bool TransferSession::attachReceiver(ClientSession *receiver, const QJsonObject 
     // помогает — он поедет второй волной.
     quint64 haveUpto = std::min<quint64>(receiver->have().prefix(), m_chunkCount);
 
-    // Опоздавший. В M1 отдать ему недостающее начало неоткуда: окно — это
-    // буфер джиттера на секунды, а backfill от других получателей появится
-    // в M2. Отказать честно лучше, чем отдать том с дырой.
+    // Опоздавший больше НЕ получает отказ.
     //
-    // Заметьте, что докачка проходит эту проверку: у кого начало уже есть,
-    // тому его и не нужно.
-    if (m_window.firstIndex() > haveUpto)
-        return fail(ferry::err::kNoSource);
-
+    // Здесь стоял `no_source`, и он был честным ровно до тех пор, пока
+    // достать начало тома было неоткуда. Теперь есть откуда:
+    // получатель СРАЗУ подписывается на живой поток — хвост и так
+    // летит всем, серверу это не стоит ни одного обращения к источнику, —
+    // а пропущенное начало тянется второй волной (§6).
+    //
+    // Курсор живой волны ставится туда, где для этого получателя
+    // начинается бесплатное: либо сразу за его непрерывным началом,
+    // либо с начала окна, если он опоздал сильнее.
     receiver->setRole(ClientSession::Role::Receiver);
     receiver->setTransfer(this);
     receiver->setReceiverId(m_nextReceiverId++);
-    receiver->setCursor(haveUpto);
+    //
+    // И одна оговорка, без которой всё это стало бы хуже честного
+    // отказа. Вторая волна держится на том, что получатель говорит,
+    // что у него есть. Клиент M1 этого не умеет — значит достать ему
+    // пропущенное неоткуда, и пустить его дальше значило бы отдать том
+    // с дырой молча. Отказ здесь остаётся — но только для него.
+    if (!receiver->speaks(ClientSession::FeatureRanges) && m_window.firstIndex() > haveUpto)
+        return fail(ferry::err::kNoSource);
+
+    receiver->setCursor(std::max<quint64>(haveUpto, m_window.firstIndex()));
     receiver->setAcked(haveUpto);
+    receiver->setWindowHint(0);
+    receiver->setBackfillHint(0);
     m_receivers.append(receiver);
 
     // Использование списывается ЗДЕСЬ — то есть после того, как получатель
@@ -311,6 +328,22 @@ void TransferSession::detach(ClientSession *session)
 
     m_receivers.removeAll(session);
     session->setTransfer(nullptr);
+
+    // Его могли попросить отдать чанки — теперь их не дождаться.
+    // Забываем сразу, а не по сторожевому таймеру: потолок чанков
+    // в пути маленький, и четыре повисших просьбы остановили бы
+    // вторую волну целиком на пять секунд.
+    for (auto it = m_askedOf.begin(); it != m_askedOf.end();) {
+        if (it.value() == session) {
+            m_backfillInFlight.clear(it.key());
+            it = m_askedOf.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (ClientSession *r : std::as_const(m_receivers))
+        r->setBackfillHint(0);
+
     // Ушёл самый медленный — остальным можно ехать дальше.
     pump();
 }
@@ -342,6 +375,16 @@ bool TransferSession::onSenderFrame(const QByteArray &frame, QString *errorCode)
                           + qint64(ferry::kGcmTagSize);
     if (frame.size() != expect)
         return fail(ferry::err::kBadMessage);
+
+    // Чанк второй волны: мы его просили полосой backfill. Уезжает
+    // сразу тем, кто ждёт, и нигде не оседает.
+    if (m_backfillInFlight.has(index)) {
+        m_backfillInFlight.clear(index);
+        m_lastGrowthMs = QDateTime::currentMSecsSinceEpoch();
+        deliverBackfillFrame(index, frame);
+        pump();
+        return true;
+    }
 
     // Повтор того, что уже уехало получателям, — не ошибка: отправитель мог
     // не успеть увидеть наш need и прислать диапазон дважды.
@@ -380,6 +423,90 @@ bool TransferSession::onReceiverHave(ClientSession *receiver, const QJsonObject 
     return true;
 }
 
+bool TransferSession::onPeerFrame(ClientSession *peer, const QByteArray &frame,
+                                  QString *errorCode)
+{
+    const auto fail = [&](const char *code) {
+        if (errorCode)
+            *errorCode = QString::fromLatin1(code);
+        return false;
+    };
+
+    if (!m_hasOffer || m_state != State::Active)
+        return fail(ferry::err::kBadMessage);
+    if (frame.size() < int(ferry::kBinaryHeaderSize))
+        return fail(ferry::err::kBadMessage);
+    if (quint8(frame.at(0)) != ferry::OpChunk)
+        return fail(ferry::err::kBadMessage);
+
+    const quint64 index = readBe64(frame.constData() + 1);
+    if (index >= m_chunkCount)
+        return fail(ferry::err::kBadMessage);
+
+    // Принимаем только то, что сами попросили ИМЕННО У НЕГО.
+    //
+    // Без этой проверки любой подключившийся мог бы подмешивать
+    // байты в чужую раздачу — и хотя получатель всё равно проверит хеш
+    // и выбросит мусор, трафик и время были бы потрачены чужими.
+    if (!m_backfillInFlight.has(index) || m_askedOf.value(index, nullptr) != peer)
+        return fail(ferry::err::kBadMessage);
+
+    const ferry::ChunkPlan plan = ferry::planWith(m_totalBytes, m_chunkSize);
+    const qint64 expect = qint64(ferry::kBinaryHeaderSize) + plan.sizeOf(index)
+                          + qint64(ferry::kGcmTagSize);
+    if (frame.size() != expect)
+        return fail(ferry::err::kBadMessage);
+
+    m_backfillInFlight.clear(index);
+    m_askedOf.remove(index);
+    m_servedBy.insert(index, {peer, QDateTime::currentMSecsSinceEpoch()});
+    m_lastGrowthMs = QDateTime::currentMSecsSinceEpoch();
+
+    deliverBackfillFrame(index, frame);
+    pump();
+    return true;
+}
+
+void TransferSession::onBadChunk(ClientSession *receiver, quint64 index, const QString &reason)
+{
+    if (index >= m_chunkCount)
+        return;
+
+    // Забываем, что этот чанк уже ехал, и откатываем подсказку
+    // получателя туда же: иначе планировщик прошёл бы мимо дырки
+    // вперёд и больше к ней не вернулся.
+    m_backfillInFlight.clear(index);
+    m_askedOf.remove(index);
+    receiver->sent().clear(index);
+    if (index < receiver->backfillHint())
+        receiver->setBackfillHint(index);
+    if (index < receiver->windowHint())
+        receiver->setWindowHint(index);
+
+    // Жалоба записывается тому, кто этот чанк прислал. Отправитель
+    // счётчика не имеет сознательно: отказаться от него значило бы
+    // остаться вовсе без источника, а если врёт он, то том и так не соберётся.
+    const auto served = m_servedBy.value(index, {nullptr, 0});
+    if (served.first && m_receivers.contains(served.first)) {
+        served.first->addBackfillStrike();
+        if (served.first->backfillStrikes() == kMaxStrikes) {
+            qInfo().noquote()
+                << QStringLiteral("получатель %1 больше не спрашивается как источник")
+                       .arg(served.first->receiverId());
+        }
+    }
+    m_servedBy.remove(index);
+
+    // В журнал это стоит писать: одиночный отказ ничего не значит, а
+    // поток отказов — единственный след источника, который врёт. Имени
+    // раздачи здесь нет — только номер получателя внутри неё.
+    qInfo().noquote() << QStringLiteral("чанк %1 отвергнут получателем %2 (%3)")
+                             .arg(index)
+                             .arg(receiver->receiverId())
+                             .arg(reason.isEmpty() ? QStringLiteral("без причины")
+                                                   : reason);
+}
+
 bool TransferSession::onReceiverRequest(ClientSession *receiver, const QJsonObject &msg)
 {
     std::vector<ferry::ChunkRange> ranges;
@@ -416,6 +543,17 @@ void TransferSession::tick(qint64 nowMs)
     if (m_state != State::Active || !m_sender || !m_hasOffer)
         return;
 
+    forgetStalledBackfill(nowMs);
+
+    // Кто что прислал — помним недолго: жалоба приходит сразу за
+    // чанком, а держать запись на каждый чанк тома — это уже хранилище.
+    for (auto it = m_servedBy.begin(); it != m_servedBy.end();) {
+        if (nowMs - it.value().second > kServedByTtlMs)
+            it = m_servedBy.erase(it);
+        else
+            ++it;
+    }
+
     // Ждём ли мы чего-то от отправителя прямо сейчас.
     const bool outstanding = m_requestedUpTo >= qint64(m_window.endIndex());
     if (!outstanding)
@@ -431,6 +569,24 @@ void TransferSession::tick(qint64 nowMs)
     requestFromSender();
 }
 
+void TransferSession::forgetStalledBackfill(qint64 nowMs)
+{
+    // Тот же сторож, но для второй волны, и без него здесь хуже, чем
+    // с живой: потолок чанков в пути маленький, и одна потерянная
+    // просьба заняла бы четверть полосы навсегда.
+    if (m_backfillInFlight.empty() || m_backfillAskedMs == 0)
+        return;
+    if (nowMs - m_backfillAskedMs < kStallMs)
+        return;
+    m_backfillInFlight.reset(m_chunkCount);
+    m_askedOf.clear();
+    m_backfillAskedMs = 0;
+    // Подсказку откатываем только сендерную: то, что уже ушло из
+    // окна, ушло честно и пересылать его незачем.
+    for (ClientSession *r : std::as_const(m_receivers))
+        r->setBackfillHint(0);
+}
+
 void TransferSession::pump()
 {
     if (m_state != State::Active || !m_hasOffer)
@@ -440,20 +596,35 @@ void TransferSession::pump()
     //    У каждого свой курсор и свой канал; быстрый не ждёт медленного.
     QList<ClientSession *> lost;
     for (ClientSession *r : std::as_const(m_receivers)) {
-        // Выпал из окна. В M1 достать это неоткуда: backfill появится в M2.
-        // Молча ждать нельзя — получатель завис бы навсегда, глядя на
-        // остановившийся прогресс и не понимая, почему.
+        // Выпал из окна — подхватываем живую волну с начала окна,
+        // а всё, что между ним и курсором, уходит во вторую волну.
+        //
+        // Здесь стоял отказ no_source. Дроп-бихайнд теперь работает так,
+        // как задумано в §6: отставший не выбывает, а переходит в догон,
+        // и один медленный клиент не придерживает группу.
         if (r->cursor() < m_window.firstIndex()) {
-            lost.append(r);
-            continue;
+            if (!r->speaks(ClientSession::FeatureRanges)) {
+                lost.append(r);
+                continue;
+            }
+            r->setCursor(m_window.firstIndex());
         }
+
         while (r->cursor() < m_window.endIndex() && r->pendingBytes() < kSocketHighWater) {
             const QByteArray frame = m_window.at(r->cursor());
             if (frame.isEmpty())
                 break;
-            r->sendBinary(frame);
+            // Живая волна не пересылает то, что у получателя уже есть:
+            // при докачке с дырками это целые мегабайты впустую.
+            if (!r->have().has(r->cursor())) {
+                r->sendBinary(frame);
+                r->sent().set(r->cursor());
+            }
             r->setCursor(r->cursor() + 1);
         }
+
+        // 1б. Вторая волна, источник № 1: недостающее, которое ещё в окне.
+        serveBackfillFromWindow(r);
     }
     for (ClientSession *r : std::as_const(lost)) {
         QJsonObject err;
@@ -479,6 +650,200 @@ void TransferSession::pump()
     //    окно способно удержать, планировщику не даёт кредит: он не
     //    просит у отправителя больше, чем slowest + вместимость окна.
     requestFromSender();
+
+    // 3. И то, чего в окне уже нет, — отдельной полосой и с потолком.
+    requestBackfill();
+}
+
+quint64 TransferSession::nextMissing(const ClientSession *receiver, quint64 from) const
+{
+    if (from >= m_chunkCount)
+        return m_chunkCount;
+
+    // Если получатель прислал request, мы отдаём только то, что он
+    // просил. Не прислал — считаем, что нужен весь том: именно так
+    // ведёт себя клиент M1, и оставить его без второй волны значило бы
+    // сломать ему ровно тот случай, ради которого всё делалось.
+    // Не умеет диапазонов — значит его have у нас всегда пусто, и любой
+    // чанк выглядит недостающим. Засыпать его повторами нельзя.
+    if (!receiver->speaks(ClientSession::FeatureRanges))
+        return m_chunkCount;
+
+    const bool asked = !receiver->wanted().empty();
+    quint64 i = from;
+    while (i < m_chunkCount) {
+        i = receiver->have().firstMissing(i);
+        if (i >= m_chunkCount)
+            return m_chunkCount;
+        // Уже отправленное недостающим не считается — см. ClientSession::sent().
+        if (!receiver->sent().has(i) && (!asked || receiver->wanted().has(i)))
+            return i;
+        ++i;
+    }
+    return m_chunkCount;
+}
+
+void TransferSession::serveBackfillFromWindow(ClientSession *receiver)
+{
+    // Источник № 1 из §6 и самый дешёвый: чанк уже в оперативке,
+    // источнику за ним идти не надо. Два случая: получатель
+    // подключился, когда окно уже ушло вперёд, и докачка с дырками.
+    quint64 i = std::max<quint64>(receiver->windowHint(), m_window.firstIndex());
+    while (receiver->pendingBytes() < kSocketHighWater) {
+        i = nextMissing(receiver, i);
+        if (i >= receiver->cursor() || i >= m_window.endIndex())
+            break;
+        if (!m_window.contains(i)) {
+            ++i;
+            continue;
+        }
+        const QByteArray frame = m_window.at(i);
+        if (frame.isEmpty())
+            break;
+        receiver->sendBinary(frame);
+        receiver->sent().set(i);
+        ++i;
+        // Подсказка двигается ТОЛЬКО за успешной отправкой и только
+        // вперёд. Без этого каждый оборот цикла слал бы одно и то же
+        // заново, пока не придёт очередной have, — а это целое окно
+        // повторов за каждые триста миллисекунд.
+        receiver->setWindowHint(i);
+    }
+}
+
+bool TransferSession::canSeed(const ClientSession *receiver)
+{
+    return receiver && receiver->speaks(ClientSession::FeatureBackfill);
+}
+
+ClientSession *TransferSession::pickPeerFor(quint64 index, const ClientSession *forWhom) const
+{
+    // Самый свободный из тех, у кого этот чанк есть.
+    //
+    // «Свободный» меряется очередью в его сокет — то есть тем, сколько мы
+    // ему сами ещё не додали. Прямой меры его аплоада у нас нет и быть не
+    // может, а эта хотя бы не даёт нагрузить того, кто и так не поспевает.
+    ClientSession *best = nullptr;
+    for (ClientSession *p : m_receivers) {
+        if (p == forWhom)
+            continue;
+        if (!canSeed(p))
+            continue;
+        if (p->backfillStrikes() >= kMaxStrikes)
+            continue;
+        if (!p->have().has(index))
+            continue;
+        if (p->pendingBytes() >= kSocketHighWater)
+            continue;
+        if (!best || p->pendingBytes() < best->pendingBytes())
+            best = p;
+    }
+    return best;
+}
+
+void TransferSession::requestBackfill()
+{
+    if (m_chunkCount == 0)
+        return;
+
+    const auto full = [this] {
+        return qint64(m_backfillInFlight.cardinality()) >= kBackfillInFlight;
+    };
+    if (full())
+        return;
+
+    // Собираем то, чего не хватает хоть кому-то и чего уже нет в окне.
+    //
+    // Здесь же получается коалесцирование, и оно досталось даром: один и
+    // тот же индекс, нужный двоим, попадает в множество «в пути» один
+    // раз — и спрашивается у источника один раз.
+    QJsonArray senderRanges;
+    QHash<ClientSession *, QJsonArray> peerRanges;
+
+    for (ClientSession *r : std::as_const(m_receivers)) {
+        if (full())
+            break;
+        // У кого сокет и так полон — не просим: чанку второй волны негде
+        // будет приземлиться, он не ложится в окно.
+        if (r->pendingBytes() >= kSocketHighWater)
+            continue;
+
+        quint64 i = r->backfillHint();
+        while (!full()) {
+            i = nextMissing(r, i);
+            if (i >= r->cursor())
+                break;
+            if (m_window.contains(i) || m_backfillInFlight.has(i)) {
+                ++i;
+                continue;
+            }
+
+            // Пир вперёд отправителя. Это и есть тезис продукта: чанк,
+            // который уже есть у кого-то из группы, не должен стоить
+            // отправителю второй заливки.
+            ClientSession *peer = pickPeerFor(i, r);
+            if (!peer && !m_sender) {
+                ++i;
+                continue;   // взять неоткуда — попробуем на следующем обороте
+            }
+
+            m_backfillInFlight.set(i);
+            m_askedOf.insert(i, peer);
+            r->setBackfillHint(i);
+
+            QJsonArray range;
+            range.append(double(i));
+            range.append(double(i));
+            if (peer)
+                peerRanges[peer].append(range);
+            else
+                senderRanges.append(range);
+            ++i;
+        }
+    }
+
+    for (auto it = peerRanges.constBegin(); it != peerRanges.constEnd(); ++it) {
+        QJsonObject serve;
+        serve[QStringLiteral("type")] = QStringLiteral("serve");
+        serve[QStringLiteral("ranges")] = it.value();
+        serve[QStringLiteral("budget_bytes")] =
+            double(qint64(it.value().size()) * qint64(m_chunkSize));
+        it.key()->sendJson(serve);
+    }
+
+    if (!senderRanges.isEmpty() && m_sender) {
+        QJsonObject need;
+        need[QStringLiteral("type")] = QStringLiteral("need");
+        need[QStringLiteral("ranges")] = senderRanges;
+        need[QStringLiteral("budget_bytes")] =
+            double(qint64(senderRanges.size()) * qint64(m_chunkSize));
+        need[QStringLiteral("lane")] = QStringLiteral("backfill");
+        m_sender->sendJson(need);
+    }
+
+    if (!peerRanges.isEmpty() || !senderRanges.isEmpty())
+        m_backfillAskedMs = QDateTime::currentMSecsSinceEpoch();
+}
+
+void TransferSession::deliverBackfillFrame(quint64 index, const QByteArray &frame)
+{
+    // Уезжает всем, кому нужен, и нигде не оседает.
+    //
+    // В окно такой чанк класть нельзя принципиально: окно непрерывно,
+    // и догон опоздавшего выталкивал бы из него тех, кто идёт
+    // вовремя, — и они тоже становились бы опоздавшими. Именно
+    // поэтому потолок на число чанков в пути маленький: всё, что
+    // попросили, обязано уехать прямо сейчас.
+    for (ClientSession *r : std::as_const(m_receivers)) {
+        if (!r->speaks(ClientSession::FeatureRanges))
+            continue;
+        if (r->have().has(index))
+            continue;
+        if (index >= r->cursor())
+            continue;   // это ему привезёт живая волна
+        r->sendBinary(frame);
+        r->sent().set(index);
+    }
 }
 
 void TransferSession::requestFromSender()

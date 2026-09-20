@@ -56,6 +56,7 @@ private:
     void handleAck(ClientSession *session, const QJsonObject &msg);
     void handleHave(ClientSession *session, const QJsonObject &msg);
     void handleRequest(ClientSession *session, const QJsonObject &msg);
+    void handleBadChunk(ClientSession *session, const QJsonObject &msg);
 
     // Что умеет ЭТОТ сервер. Уезжает в offer_ok и hello_ok, и клиент по
     // нему решает, какие сообщения вообще посылать.

@@ -19,6 +19,7 @@ target_include_directories(ferry-qrcodegen PUBLIC
 
 add_executable(ferry
     main.cpp
+    ChunkPump.h   ChunkPump.cpp
     Options.h     Options.cpp
     Relay.h       Relay.cpp
     Sender.h      Sender.cpp

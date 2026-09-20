@@ -123,9 +123,7 @@ QJsonArray TransferServer::serverFeatures()
 {
     QJsonArray f;
     f.append(QStringLiteral("ranges"));
-    // "backfill" сюда добавится, когда планировщик научится рассылать
-    // serve. Объявить раньше времени — значит позвать клиента говорить о
-    // том, чего мы ещё не умеем слушать.
+    f.append(QStringLiteral("backfill"));
     return f;
 }
 
@@ -149,6 +147,8 @@ void TransferServer::onText(ClientSession *session, const QString &text)
         handleHave(session, msg);
     } else if (type == QLatin1String("request")) {
         handleRequest(session, msg);
+    } else if (type == QLatin1String("bad_chunk")) {
+        handleBadChunk(session, msg);
     } else if (type == QLatin1String("bye")) {
         session->close();
     } else if (type == QLatin1String("subscribe_live")) {
@@ -267,9 +267,9 @@ void TransferServer::handleHello(ClientSession *session, const QJsonObject &msg)
     ok[QStringLiteral("type")] = QStringLiteral("hello_ok");
     ok[QStringLiteral("receiver_id")] = int(session->receiverId());
     ok[QStringLiteral("state")] = QStringLiteral("active");
-    // Сидировать в M1 нельзя никому: reflected backfill приходит в M2.
-    // Врать об этом нельзя — получатель должен знать, чего от него не ждут.
-    ok[QStringLiteral("can_seed")] = false;
+    // Честный ответ на вопрос «будут ли меня просить отдавать»: да, если
+    // клиент сам объявил, что умеет.
+    ok[QStringLiteral("can_seed")] = TransferSession::canSeed(session);
     ok[QStringLiteral("chunks")] = double(transfer->chunkCount());
     ok[QStringLiteral("uses_left")] = transfer->usesLeft();
     ok[QStringLiteral("from_chunk")] = double(session->cursor());
@@ -320,6 +320,23 @@ void TransferServer::handleRequest(ClientSession *session, const QJsonObject &ms
     transfer->pump();
 }
 
+void TransferServer::handleBadChunk(ClientSession *session, const QJsonObject &msg)
+{
+    TransferSession *transfer = session->transfer();
+    if (!transfer || session->role() != ClientSession::Role::Receiver) {
+        sendError(session, ferry::err::kBadMessage);
+        return;
+    }
+    const double index = msg.value(QStringLiteral("index")).toDouble(-1);
+    if (index < 0) {
+        sendError(session, ferry::err::kBadMessage);
+        return;
+    }
+    transfer->onBadChunk(session, quint64(index),
+                         msg.value(QStringLiteral("reason")).toString());
+    transfer->pump();
+}
+
 void TransferServer::handleAck(ClientSession *session, const QJsonObject &msg)
 {
     TransferSession *transfer = session->transfer();
@@ -334,15 +351,28 @@ void TransferServer::handleAck(ClientSession *session, const QJsonObject &msg)
 void TransferServer::onBinary(ClientSession *session, const QByteArray &data)
 {
     TransferSession *transfer = session->transfer();
-    if (!transfer || session->role() != ClientSession::Role::Sender) {
-        // Бинарь от получателя — это будущий reflected backfill (M2).
-        // Сейчас его быть не может, и принимать его молча нельзя: иначе
-        // любой подключившийся смог бы подмешивать байты в чужую раздачу.
+    if (!transfer) {
         sendError(session, ferry::err::kBadMessage);
         return;
     }
 
     QString errorCode;
+
+    // Бинарь от получателя — это ответ на serve. Принимается только
+    // то, что сервер сам попросил именно у этого участника; всё
+    // остальное — bad_message, иначе любой подключившийся смог бы
+    // подмешивать байты в чужую раздачу.
+    if (session->role() == ClientSession::Role::Receiver) {
+        if (!transfer->onPeerFrame(session, data, &errorCode))
+            sendError(session, errorCode.toLatin1().constData());
+        return;
+    }
+
+    if (session->role() != ClientSession::Role::Sender) {
+        sendError(session, ferry::err::kBadMessage);
+        return;
+    }
+
     if (!transfer->onSenderFrame(data, &errorCode)) {
         sendError(session, errorCode.toLatin1().constData());
         return;

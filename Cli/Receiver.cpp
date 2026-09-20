@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "Cli/ChunkPump.h"
 #include "Cli/Signals.h"
 #include "Cli/net/WebSocketClient.h"
 #include "Cli/platform/Platform.h"
@@ -39,6 +40,19 @@ uint64_t readBe64(const uint8_t *p)
         v = (v << 8) | p[i];
     return v;
 }
+
+// Сколько чанков подряд готовы отвергнуть, прежде чем сдаться.
+//
+// Один испорченный чанк — не беда: сервер возьмёт его у другого
+// источника. Сотня подряд означает, что чинить нечего — либо ключ
+// не тот, либо сервер сломан, — и крутиться вечно хуже, чем сказать об
+// этом вслух.
+constexpr int kMaxBadChunks = 64;
+
+// Сколько держим в очереди сокета, отдавая чужой догон. Меньше,
+// чем у отправителя, и сознательно: сид — это прежде всего получатель,
+// и его собственная загрузка важнее чужой.
+constexpr int64_t kSeedHighWater = 2 * 1024 * 1024;
 
 // Диапазоны в JSON: [[a,b],[c,d]], границы включительные с обеих сторон.
 //
@@ -527,6 +541,10 @@ int runGet(const Options &options)
         // сервер просить у нас то, чего мы не отдадим.
         json::Value features = json::Value::array();
         features.push(json::Value::make("ranges"));
+        // Умеем отдавать чанки обратно. Сервер без этого слова не
+        // пришлёт serve ни разу — и правильно сделает: ждать чанков
+        // от того, кто их не пришлёт, значит повесить чужой догон.
+        features.push(json::Value::make("backfill"));
         hello.set("features", std::move(features));
         ws.sendText(hello.dump());
     }
@@ -605,6 +623,18 @@ int runGet(const Options &options)
         }
     }
 
+    // Насос для отдачи: читает из собственной недокачки и шифрует заново.
+    // Шифротекст получается байт в байт тот же — см. ChunkPump.h.
+    ChunkPump pump;
+    pump.init(fd, plan, keys.data, meta.noncePrefix.data());
+    ChunkSet serveQueue(plan.chunkCount);
+    uint64_t servedChunks = 0;
+
+    // Сколько чанков подряд не сошлось. Один испорченный чанк — это
+    // не беда (сервер возьмёт его у другого источника), а вот сотня
+    // подряд означает, что чинить нечего, и крутиться вечно нельзя.
+    int badInARow = 0;
+
     uint64_t received = have;
     uint64_t ackedUpTo = map.havePrefix();
     uint64_t sentHaveCount = map.set().cardinality();
@@ -635,9 +665,24 @@ int runGet(const Options &options)
                 json::Value v;
                 if (!json::Value::parse(msg.data, v) || !v.isObject())
                     continue;
-                if (v["type"].toString() == "error") {
+                const std::string type = v["type"].toString();
+                if (type == "error") {
                     failed = true;
                     failure = explainError(v["reason"].toString());
+                } else if (type == "serve") {
+                    // Сервер просит отдать чанки обратно — их ждёт
+                    // кто-то, кто пришёл позже нас.
+                    const json::Value &ranges = v["ranges"];
+                    for (size_t i = 0; i < ranges.size(); ++i) {
+                        const json::Value &r = ranges.at(i);
+                        if (r.size() < 2)
+                            continue;
+                        const int64_t from = r.at(0).toInt(-1);
+                        const int64_t to = r.at(1).toInt(-1);
+                        if (from < 0 || to < from)
+                            continue;
+                        serveQueue.setRange({uint64_t(from), uint64_t(to)});
+                    }
                 }
                 continue;
             }
@@ -659,27 +704,54 @@ int runGet(const Options &options)
             if (map.has(index))
                 continue;   // повтор — не беда
 
+            // Проверка против списка хешей — за O(1) и независимо от
+            // порядка. Именно она делает безопасным приём чанков от кого
+            // угодно: подсунуть мусор нельзя, подмена ловится на месте.
+            //
+            // И именно поэтому несошедшийся чанк БОЛЬШЕ НЕ ВАЛИТ передачу.
+            // Пока источник был один и доверенный, обрыв был честной
+            // реакцией. Как только чанк может приехать от другого получателя,
+            // такая реакция означает право любого участника убить чужую
+            // загрузку одним испорченным байтом. Теперь мы выбрасываем чанк,
+            // говорим серверу, что источник солгал, и ждём тот же индекс
+            // откуда-нибудь ещё.
+            const auto rejectChunk = [&](const char *why) {
+                ++badInARow;
+                if (serverSpeaksRanges) {
+                    json::Value bad = json::Value::object();
+                    bad.set("type", json::Value::make("bad_chunk"));
+                    bad.set("index", json::Value::make(int64_t(index)));
+                    bad.set("reason", json::Value::make(why));
+                    ws.sendText(bad.dump());
+                }
+                if (badInARow >= kMaxBadChunks) {
+                    failed = true;
+                    failure = explainError(err::kChunkMismatch);
+                }
+            };
+
             Bytes plainChunk;
             if (!openChunk(keys.data, meta.noncePrefix.data(), index, plan.chunkCount,
                            raw + kBinaryHeaderSize, msg.data.size() - kBinaryHeaderSize,
                            plainChunk)) {
-                failed = true;
-                failure = "чанк не расшифровался — тег AEAD не сошёлся";
-                break;
+                rejectChunk("aead");
+                if (failed)
+                    break;
+                continue;
             }
             if (plainChunk.size() != plan.sizeOf(index)) {
-                failed = true;
-                failure = "чанк пришёл не той длины";
-                break;
+                rejectChunk("length");
+                if (failed)
+                    break;
+                continue;
             }
-            // Проверка против списка хешей — за O(1) и независимо от
-            // порядка. Именно она делает безопасным приём чанков от кого
-            // угодно: подсунуть мусор нельзя, подмена ловится на месте.
             if (!hashes.verify(index, plainChunk.data(), plainChunk.size())) {
-                failed = true;
-                failure = explainError(err::kChunkMismatch);
-                break;
+                rejectChunk("hash");
+                if (failed)
+                    break;
+                continue;
             }
+            badInARow = 0;
 
             const int64_t written = platform::fileWriteAt(fd, plainChunk.data(),
                                                           plainChunk.size(),
@@ -697,6 +769,25 @@ int runGet(const Options &options)
         }
         if (failed)
             break;
+
+        // Отдаём то, что у нас попросили. По одному чанку за раз и с
+        // оглядкой на свою же очередь отправки: мы здесь в первую очередь
+        // получатель, и чужой догон не должен мешать собственному приёму.
+        while (!serveQueue.empty() && ws.pendingBytes() < kSeedHighWater) {
+            const uint64_t give = serveQueue.firstPresent(0);
+            if (give >= plan.chunkCount)
+                break;
+            serveQueue.clear(give);
+            if (!map.has(give))
+                continue;   // у нас этого чанка нет — сервер найдёт другой источник
+            if (!pump.send(ws, give)) {
+                // Свою загрузку из-за чужой не роняем: перестаём сидировать,
+                // и только.
+                serveQueue.reset(plan.chunkCount);
+                break;
+            }
+            ++servedChunks;
+        }
 
         const int64_t t = nowMs();
 
@@ -752,13 +843,31 @@ int runGet(const Options &options)
                 + "  " + bytes(uint64_t(double(plan.totalBytes) * frac)) + " из "
                 + bytes(plan.totalBytes),
             std::string("скорость ") + rate(meter.value()) + "   осталось " + duration(eta)
-                + "   идёт " + duration(t - startedMs),
+                + "   идёт " + duration(t - startedMs)
+                + (servedChunks ? std::string("   ") + ok() + "отдано другим "
+                                      + bytes(servedChunks * uint64_t(plan.chunkSize)) + reset()
+                                : std::string()),
             std::string("карта    ") + volumeMap(segments, std::max(20, cells - 12)),
         });
     }
 
     panel.finish();
     map.flush();
+
+    // Последний have — обязательно, и не ради красоты.
+    //
+    // Отчёты идут не чаще раза в 300 мс, а небольшой том на быстром канале
+    // уезжает быстрее: сервер тогда не услышал бы от нас ни одного have и
+    // остался бы в убеждении, что у нас ничего нет. Для приёма это
+    // безразлично, а вот сидировать нас после этого не позовут никогда —
+    // источником выбирают того, про кого известно, что у него есть нужное.
+    if (serverSpeaksRanges && ws.isOpen() && !failed) {
+        json::Value have = json::Value::object();
+        have.set("type", json::Value::make("have"));
+        have.set("ranges", rangesToJson(map.set().ranges()));
+        ws.sendText(have.dump());
+        ws.pump(0);
+    }
 
     if (failed) {
         platform::fileSync(fd);
@@ -786,7 +895,10 @@ int runGet(const Options &options)
         return 1;
     }
     platform::fileClose(fd);
-    ws.closeGracefully();
+    // Сокет НЕ закрываем здесь: с --seed мы остаёмся на связи и
+    // отдаём чанки дальше. Закрытие — в конце, по обоим путям.
+    if (!options.seed)
+        ws.closeGracefully();
 
     if (!platform::fileRename(partPath, outPath)) {
         std::fprintf(stderr, "Не удалось переименовать %s в %s\n", partPath.c_str(),
@@ -807,6 +919,77 @@ int runGet(const Options &options)
     std::printf("%s│%s %s\n", ok(), reset(),
                 field("целостность", "проверено BLAKE3 по каждому чанку").c_str());
     std::printf("%s%s%s\n", ok(), ruleBottom(cells).c_str(), reset());
+
+    // ---- 9. Сидирование ----
+    //
+    // Файл уже переименован и лежит на месте: человеку не надо дожидаться
+    // конца сидирования, чтобы его открыть. Отдаём теперь из готового
+    // файла — смещения те же, содержимое то же.
+    if (!options.seed)
+        return 0;
+
+    const platform::File seedFd = platform::fileOpenRead(outPath);
+    if (seedFd == platform::kInvalidFile) {
+        std::fprintf(stderr, "%sФайл не открылся на чтение — сидировать не из чего.%s\n", dim(),
+                     reset());
+        return 0;
+    }
+    pump.init(seedFd, plan, keys.data, meta.noncePrefix.data());
+
+    std::printf("\n%sОстаюсь источником для остальных. Ctrl-C — выйти.%s\n\n", dim(), reset());
+
+    LivePanel seedPanel;
+    const int64_t seedStartedMs = nowMs();
+    while (!stopRequested() && ws.isOpen()) {
+        if (!ws.pump(200))
+            break;
+
+        net::WsMessage m;
+        while (ws.next(m)) {
+            if (m.binary)
+                continue;   // нам больше ничего не нужно
+            json::Value v;
+            if (!json::Value::parse(m.data, v) || !v.isObject())
+                continue;
+            if (v["type"].toString() != "serve")
+                continue;
+            const json::Value &ranges = v["ranges"];
+            for (size_t i = 0; i < ranges.size(); ++i) {
+                const json::Value &r = ranges.at(i);
+                if (r.size() < 2)
+                    continue;
+                const int64_t from = r.at(0).toInt(-1);
+                const int64_t to = r.at(1).toInt(-1);
+                if (from < 0 || to < from)
+                    continue;
+                serveQueue.setRange({uint64_t(from), uint64_t(to)});
+            }
+        }
+
+        while (!serveQueue.empty() && ws.pendingBytes() < kSeedHighWater) {
+            const uint64_t give = serveQueue.firstPresent(0);
+            if (give >= plan.chunkCount)
+                break;
+            serveQueue.clear(give);
+            if (!pump.send(ws, give)) {
+                std::fprintf(stderr, "\n%s\n", pump.error().c_str());
+                serveQueue.reset(plan.chunkCount);
+                break;
+            }
+            ++servedChunks;
+        }
+
+        seedPanel.update({
+            std::string("источник  отдано ")
+                + bytes(servedChunks * uint64_t(plan.chunkSize)) + "   идёт "
+                + duration(nowMs() - seedStartedMs),
+        });
+    }
+    seedPanel.finish();
+    platform::fileClose(seedFd);
+    ws.closeGracefully();
+    std::printf("%sСидирование остановлено. Отдано %s.%s\n", dim(),
+                bytes(servedChunks * uint64_t(plan.chunkSize)).c_str(), reset());
     return 0;
 }
 

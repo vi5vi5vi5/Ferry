@@ -150,6 +150,8 @@ Options Options::parse(const std::vector<std::string> &args)
             o.key = need("ключ");
         else if (arg == "-y" || arg == "--yes")
             o.yes = true;
+        else if (arg == "--seed")
+            o.seed = true;
         else if (arg == "-h" || arg == "--help")
             o.command = Command::Help;
         else if (!arg.empty() && arg[0] == '-') {
@@ -199,7 +201,8 @@ void printHelp()
     std::printf("Ключи get:\n");
     std::printf("  -o, --output <путь>   куда положить\n");
     std::printf("  --id <id> --key <ключ>  если ссылка потеряла часть после решётки\n");
-    std::printf("  -y, --yes             не спрашивать подтверждения\n\n");
+    std::printf("  -y, --yes             не спрашивать подтверждения\n");
+    std::printf("  --seed                после приёма остаться источником до Ctrl-C\n\n");
     std::printf("Общие:\n");
     std::printf("  --relay <адрес>       адрес релея (иначе из файла настроек)\n");
     std::printf("  --name <имя>          как представиться отправителю\n");
