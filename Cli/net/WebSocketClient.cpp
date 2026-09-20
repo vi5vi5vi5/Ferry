@@ -108,7 +108,7 @@ bool WebSocketClient::connectTo(const std::string &host, uint16_t port, bool tls
         }
         if (n == 0) {
             bool ready = false;
-            waitFor(m_socket.fd(), m_socket.wantRead(), !m_socket.wantRead(), timeoutMs, &ready,
+            waitFor(m_socket.handle(), m_socket.wantRead(), !m_socket.wantRead(), timeoutMs, &ready,
                     &ready);
             continue;
         }
@@ -126,7 +126,7 @@ bool WebSocketClient::connectTo(const std::string &host, uint16_t port, bool tls
         }
         if (n == 0) {
             bool ready = false;
-            if (!waitFor(m_socket.fd(), true, false, timeoutMs, &ready, nullptr) || !ready) {
+            if (!waitFor(m_socket.handle(), true, false, timeoutMs, &ready, nullptr) || !ready) {
                 if (err)
                     *err = "сервер не ответил на смену протокола";
                 return false;
@@ -360,7 +360,7 @@ bool WebSocketClient::pump(int timeoutMs)
     // вхолостую на полной скорости.
     const bool wantWrite = !m_out.empty();
     bool readable = false, writable = false;
-    if (!waitFor(m_socket.fd(), true, wantWrite, timeoutMs, &readable, &writable)) {
+    if (!waitFor(m_socket.handle(), true, wantWrite, timeoutMs, &readable, &writable)) {
         m_error = "ошибка ожидания на сокете";
         return false;
     }
@@ -421,7 +421,7 @@ void WebSocketClient::closeGracefully()
     // два байта за полсекунды, на том конце уже никого нет.
     for (int i = 0; i < 50 && !m_out.empty(); ++i) {
         bool writable = false;
-        waitFor(m_socket.fd(), false, true, 10, nullptr, &writable);
+        waitFor(m_socket.handle(), false, true, 10, nullptr, &writable);
         if (!flushOutgoing())
             break;
     }

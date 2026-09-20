@@ -8,12 +8,9 @@
 #include <string>
 #include <vector>
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include "Cli/Signals.h"
 #include "Cli/net/WebSocketClient.h"
+#include "Cli/platform/Platform.h"
 #include "Cli/ui/LivePanel.h"
 #include "Cli/ui/Term.h"
 #include "core/Base64Url.h"
@@ -32,12 +29,6 @@ int64_t nowMs()
 {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-}
-
-bool fileExists(const std::string &path)
-{
-    struct stat st{};
-    return ::stat(path.c_str(), &st) == 0;
 }
 
 uint64_t readBe64(const uint8_t *p)
@@ -73,18 +64,18 @@ public:
     // тома (тогда вызывающий начинает с нуля).
     bool load()
     {
-        const int fd = ::open(m_path.c_str(), O_RDONLY);
-        if (fd < 0)
+        const platform::File fd = platform::fileOpenRead(m_path);
+        if (fd == platform::kInvalidFile)
             return false;
 
         uint8_t head[8 + 4 + 4 + 8 + 8 + 32];
-        const ssize_t got = ::read(fd, head, sizeof(head));
-        if (got != ssize_t(sizeof(head))) {
-            ::close(fd);
+        const int64_t got = platform::fileReadAt(fd, head, sizeof(head), 0);
+        if (got != int64_t(sizeof(head))) {
+            platform::fileClose(fd);
             return false;
         }
         if (std::memcmp(head, "FERRYMAP", 8) != 0) {
-            ::close(fd);
+            platform::fileClose(fd);
             return false;
         }
         const uint32_t version = (uint32_t(head[8]) << 24) | (uint32_t(head[9]) << 16)
@@ -99,13 +90,13 @@ public:
         // лежит недокачка чего-то другого, и мешать их нельзя.
         if (version != 1 || chunkSize != m_chunkSize || count != m_count || total != m_total
             || std::memcmp(head + 32, m_root.data(), 32) != 0) {
-            ::close(fd);
+            platform::fileClose(fd);
             return false;
         }
 
-        const ssize_t bits = ::read(fd, m_bits.data(), m_bits.size());
-        ::close(fd);
-        return bits == ssize_t(m_bits.size());
+        const int64_t bits = platform::fileReadAt(fd, m_bits.data(), m_bits.size(), sizeof(head));
+        platform::fileClose(fd);
+        return bits == int64_t(m_bits.size());
     }
 
     bool has(uint64_t index) const
@@ -140,8 +131,8 @@ public:
 
     bool flush() const
     {
-        const int fd = ::open(m_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        if (fd < 0)
+        const platform::File fd = platform::fileOpenReadWrite(m_path);
+        if (fd == platform::kInvalidFile)
             return false;
 
         uint8_t head[8 + 4 + 4 + 8 + 8 + 32];
@@ -157,13 +148,17 @@ public:
             head[24 + i] = uint8_t(m_total >> (56 - 8 * i));
         std::memcpy(head + 32, m_root.data(), 32);
 
-        bool okWrite = ::write(fd, head, sizeof(head)) == ssize_t(sizeof(head));
-        okWrite = okWrite && ::write(fd, m_bits.data(), m_bits.size()) == ssize_t(m_bits.size());
-        ::close(fd);
+        bool okWrite = platform::fileWriteAt(fd, head, sizeof(head), 0) == int64_t(sizeof(head));
+        okWrite = okWrite
+                  && platform::fileWriteAt(fd, m_bits.data(), m_bits.size(), sizeof(head))
+                         == int64_t(m_bits.size());
+        // Длина карты фиксирована и известна заранее, поэтому обрезать
+        // хвост не нужно: файл либо новый, либо ровно такой же.
+        platform::fileClose(fd);
         return okWrite;
     }
 
-    void remove() const { ::unlink(m_path.c_str()); }
+    void remove() const { platform::fileRemove(m_path); }
 
 private:
     std::string m_path;
@@ -382,7 +377,7 @@ int runGet(const Options &options)
     std::printf("%s│%s %s\n", dim(), reset(), field("сохранить в", outPath).c_str());
     std::printf("%s%s%s\n", dim(), ruleBottom(cells).c_str(), reset());
 
-    if (fileExists(outPath)) {
+    if (platform::fileExists(outPath)) {
         std::fprintf(stderr, "\n%s уже существует. Укажите другое имя через -o.\n",
                      outPath.c_str());
         return 1;
@@ -404,25 +399,31 @@ int runGet(const Options &options)
     // ---- 4. Файл и карта принятого ----
     ChunkMap map;
     map.init(mapPath, plan.chunkCount, plan.chunkSize, plan.totalBytes, manifest.root);
-    const bool resuming = map.load() && fileExists(partPath);
+    const bool resuming = map.load() && platform::fileExists(partPath);
     if (!resuming) {
         map.init(mapPath, plan.chunkCount, plan.chunkSize, plan.totalBytes, manifest.root);
-        ::unlink(partPath.c_str());
+        platform::fileRemove(partPath);
     }
 
-    const int fd = ::open(partPath.c_str(), O_RDWR | O_CREAT, 0600);
-    if (fd < 0) {
+    const platform::File fd = platform::fileOpenReadWrite(partPath);
+    if (fd == platform::kInvalidFile) {
         std::fprintf(stderr, "Не смог создать %s\n", partPath.c_str());
         return 1;
     }
     // Растягиваем файл сразу на полный размер: дальше мы пишем по
     // смещениям, и место должно быть заранее — иначе первая же дырка
     // превратится в ошибку записи на середине тома.
-    if (::ftruncate(fd, off_t(plan.totalBytes)) != 0) {
+    if (!platform::fileTruncate(fd, plan.totalBytes)) {
         std::fprintf(stderr, "Не хватает места под %s\n", bytes(plan.totalBytes).c_str());
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
+
+    // Карту пишем сразу, ещё до первого чанка. Иначе обрыв в первые
+    // секунды оставлял бы на диске недокачку БЕЗ карты — файл есть, а
+    // понять, что в нём настоящее, нечем, и при следующем запуске всё
+    // начиналось бы с нуля. Дальше она обновляется раз в пару секунд.
+    map.flush();
 
     uint64_t have = map.haveCount();
     if (resuming && have > 0) {
@@ -435,13 +436,13 @@ int runGet(const Options &options)
     Bytes challenge;
     if (!apiFetchChallenge(relay, link.id, challenge, &err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
     const Bytes proof = proveKeyOwnership(keys.verifier, challenge.data(), challenge.size());
     if (proof.size() != 32) {
         std::fprintf(stderr, "Не удалось посчитать доказательство владения ключом.\n");
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
 
@@ -450,7 +451,7 @@ int runGet(const Options &options)
     if (!ws.connectTo(relay.host, relay.port, relay.tls, relay.insecure, std::string(kWsPath),
                       20000, &err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
 
@@ -485,7 +486,7 @@ int runGet(const Options &options)
                 std::fprintf(stderr, "%s\n", explainError(reason).c_str());
             else
                 std::fprintf(stderr, "Соединение оборвалось: %s\n", ws.error().c_str());
-            ::close(fd);
+            platform::fileClose(fd);
             return 1;
         }
         net::WsMessage msg;
@@ -502,14 +503,14 @@ int runGet(const Options &options)
                 accepted = true;
             } else if (type == "error") {
                 std::fprintf(stderr, "%s\n", explainError(v["reason"].toString()).c_str());
-                ::close(fd);
+                platform::fileClose(fd);
                 return 1;
             }
         }
     }
     if (!accepted) {
         std::fprintf(stderr, "Сервер не пустил к раздаче.\n");
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
 
@@ -598,9 +599,10 @@ int runGet(const Options &options)
                 break;
             }
 
-            const ssize_t written = ::pwrite(fd, plainChunk.data(), plainChunk.size(),
-                                             off_t(plan.offsetOf(index)));
-            if (written != ssize_t(plainChunk.size())) {
+            const int64_t written = platform::fileWriteAt(fd, plainChunk.data(),
+                                                          plainChunk.size(),
+                                                          plan.offsetOf(index));
+            if (written != int64_t(plainChunk.size())) {
                 failed = true;
                 failure = "не удалось записать на диск — кончилось место?";
                 break;
@@ -616,9 +618,15 @@ int runGet(const Options &options)
 
         const int64_t t = nowMs();
 
-        // Карта на диск — раз в пару секунд, а не на каждый чанк: на
+        // Карта на диск — раз в полсекунды, а не на каждый чанк: на
         // гигабитном канале это была бы тысяча записей в секунду.
-        if (t - lastFlushMs > 2000) {
+        //
+        // Полсекунды, а не две: карта весит один бит на чанк (у тома в
+        // 5 ГиБ это 160 байт), и запись её стоит ровно ничего. Зато
+        // интервал — это ровно столько работы, сколько теряется, если
+        // клиента убьют не по-хорошему, а на быстром канале за две
+        // секунды успевает приехать пара сотен мегабайт.
+        if (t - lastFlushMs > 500) {
             map.flush();
             lastFlushMs = t;
         }
@@ -651,8 +659,8 @@ int runGet(const Options &options)
     map.flush();
 
     if (failed) {
-        ::fsync(fd);
-        ::close(fd);
+        platform::fileSync(fd);
+        platform::fileClose(fd);
         ws.closeGracefully();
         std::fprintf(stderr, "\n%sПриём прерван:%s %s\n", bad(), reset(), failure.c_str());
         std::fprintf(stderr, "%sПринятое сохранено в %s — при следующем запуске продолжим.%s\n",
@@ -661,8 +669,8 @@ int runGet(const Options &options)
     }
 
     if (stopRequested()) {
-        ::fsync(fd);
-        ::close(fd);
+        platform::fileSync(fd);
+        platform::fileClose(fd);
         ws.closeGracefully();
         std::printf("\n%sОстановлено. Принятое сохранено в %s.%s\n", dim(), partPath.c_str(),
                     reset());
@@ -670,15 +678,15 @@ int runGet(const Options &options)
     }
 
     // ---- 8. Готово ----
-    if (::fsync(fd) != 0) {
+    if (!platform::fileSync(fd)) {
         std::fprintf(stderr, "Не удалось дописать файл на диск.\n");
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
-    ::close(fd);
+    platform::fileClose(fd);
     ws.closeGracefully();
 
-    if (::rename(partPath.c_str(), outPath.c_str()) != 0) {
+    if (!platform::fileRename(partPath, outPath)) {
         std::fprintf(stderr, "Не удалось переименовать %s в %s\n", partPath.c_str(),
                      outPath.c_str());
         return 1;

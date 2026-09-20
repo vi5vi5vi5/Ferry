@@ -5,8 +5,7 @@
 #include <cstring>
 #include <fstream>
 
-#include <unistd.h>
-
+#include "Cli/platform/Platform.h"
 #include "Cli/ui/Term.h"
 
 namespace ferry::cli {
@@ -30,7 +29,7 @@ bool truthy(const std::string &v)
 // Файл настроек: простые "ключ = значение", комментарии с #.
 void applyConfigFile(Options &o)
 {
-    const std::string path = configPath();
+    const std::string path = platform::configFilePath();
     if (path.empty())
         return;
     std::ifstream in(path);
@@ -71,17 +70,6 @@ void applyEnvironment(Options &o)
 
 } // namespace
 
-std::string configPath()
-{
-    if (const char *xdg = std::getenv("XDG_CONFIG_HOME"))
-        if (*xdg)
-            return std::string(xdg) + "/ferry/config";
-    if (const char *home = std::getenv("HOME"))
-        if (*home)
-            return std::string(home) + "/.config/ferry/config";
-    return {};
-}
-
 int64_t parseDurationMs(const std::string &text)
 {
     if (text.empty())
@@ -103,15 +91,17 @@ int64_t parseDurationMs(const std::string &text)
     return 0;
 }
 
-Options Options::parse(int argc, char **argv)
+Options Options::parse(const std::vector<std::string> &args)
 {
+    const int argc = int(args.size());
+
     Options o;
     if (argc < 2) {
         o.command = Command::Help;
         return o;
     }
 
-    const std::string cmd = argv[1];
+    const std::string cmd = args[1];
     if (cmd == "send")
         o.command = Command::Send;
     else if (cmd == "get")
@@ -129,13 +119,13 @@ Options Options::parse(int argc, char **argv)
 
     std::vector<std::string> positional;
     for (int i = 2; i < argc; ++i) {
-        const std::string arg = argv[i];
+        const std::string arg = args[size_t(i)];
         const auto need = [&](const char *what) -> std::string {
             if (i + 1 >= argc) {
                 o.error = std::string("у ") + arg + " нет значения (" + what + ")";
                 return {};
             }
-            return argv[++i];
+            return args[size_t(++i)];
         };
 
         if (arg == "--relay")
@@ -211,7 +201,7 @@ void printHelp()
     std::printf("  --id <id> --key <ключ>  если ссылка потеряла часть после решётки\n");
     std::printf("  -y, --yes             не спрашивать подтверждения\n\n");
     std::printf("Общие:\n");
-    std::printf("  --relay <адрес>       адрес релея (иначе из ~/.config/ferry/config)\n");
+    std::printf("  --relay <адрес>       адрес релея (иначе из файла настроек)\n");
     std::printf("  --name <имя>          как представиться отправителю\n");
     std::printf("  -k, --insecure        не проверять сертификат сервера\n");
     std::printf("  --version             версия\n\n");

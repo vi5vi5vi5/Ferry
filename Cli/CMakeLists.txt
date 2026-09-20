@@ -25,6 +25,10 @@ add_executable(ferry
     Receiver.h    Receiver.cpp
     Signals.h     Signals.cpp
 
+    platform/Platform.h
+    platform/Platform_posix.cpp
+    platform/Platform_windows.cpp
+
     net/TlsSocket.h        net/TlsSocket.cpp
     net/HttpClient.h       net/HttpClient.cpp
     net/WebSocketClient.h  net/WebSocketClient.cpp
@@ -39,6 +43,12 @@ add_executable(ferry
 target_include_directories(ferry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 target_link_libraries(ferry PRIVATE ferry-core ferry-crypto ferry-qrcodegen)
+
+# Windows: сокеты (ws2_32) и разбор командной строки в UTF-16 (shell32).
+# Обе библиотеки системные, ничего ставить не нужно.
+if(WIN32)
+    target_link_libraries(ferry PRIVATE ws2_32 shell32)
+endif()
 
 # TLS ещё и в самом клиенте (рукопожатие WebSocket) — помимо криптографии
 # тома, которая живёт в ferry-crypto.

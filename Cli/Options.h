@@ -39,11 +39,11 @@ struct Options
 
     std::string error;          // непусто — разбор не удался
 
-    static Options parse(int argc, char **argv);
+    // Аргументы приходят уже в UTF-8: на Windows их достаёт
+    // platform::arguments из GetCommandLineW, потому что штатный argv
+    // отдан в кодировке системы и кириллица в нём уже испорчена.
+    static Options parse(const std::vector<std::string> &args);
 };
-
-// Где лежит файл настроек. Пусто — не удалось понять домашний каталог.
-std::string configPath();
 
 // Разбор строки вида "1h", "24h", "7d", "90m", "3600" (секунды).
 // Возвращает 0, если не разобралось.

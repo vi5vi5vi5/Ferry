@@ -18,9 +18,12 @@ void installSignalHandlers()
 {
     std::signal(SIGINT, onSignal);
     std::signal(SIGTERM, onSignal);
+#ifndef _WIN32
     // Труба закрылась (`ferry send x | head`) — это не повод падать по
     // SIGPIPE посреди раздачи: запись вернёт EPIPE, и мы разберёмся сами.
+    // На Windows такого сигнала нет вовсе.
     std::signal(SIGPIPE, SIG_IGN);
+#endif
 }
 
 bool stopRequested()

@@ -17,6 +17,7 @@
 #include "Cli/Relay.h"
 #include "Cli/Sender.h"
 #include "Cli/Signals.h"
+#include "Cli/platform/Platform.h"
 #include "Cli/ui/Term.h"
 #include "core/Protocol.h"
 
@@ -38,7 +39,7 @@ void printVersion()
 void printConfig(const ferry::cli::Options &options)
 {
     using namespace ferry::ui;
-    const std::string path = ferry::cli::configPath();
+    const std::string path = ferry::platform::configFilePath();
     std::printf("%s\n", field("файл настроек", path.empty() ? "не найден" : path).c_str());
     std::printf("%s\n",
                 field("релей", options.relay.empty() ? "не задан" : options.relay).c_str());
@@ -46,9 +47,14 @@ void printConfig(const ferry::cli::Options &options)
                                                              : "проверяется").c_str());
     std::printf("%s\n", field("имя", options.name.empty() ? "не задано" : options.name).c_str());
     if (options.relay.empty()) {
-        std::printf("\n%sЧтобы не писать --relay каждый раз, пропишите адрес:%s\n", dim(), reset());
-        std::printf("  mkdir -p ~/.config/ferry && echo 'relay = ferry.example.ru' > "
-                    "~/.config/ferry/config\n");
+        // Путь к файлу настроек разный на разных системах, поэтому не
+        // показываем чужой: печатаем тот, который клиент реально читает.
+        std::printf("\n%sПроще всего поставить клиент прямо с релея — он пропишет"
+                    " адрес сам:%s\n", dim(), reset());
+        std::printf("  curl -fsSL https://<адрес-релея>/install.sh | sh\n");
+        if (!path.empty())
+            std::printf("%sИли впишите строку «relay = <адрес>» в %s%s\n",
+                        dim(), path.c_str(), reset());
     }
 }
 
@@ -74,9 +80,13 @@ int main(int argc, char **argv)
 {
     using namespace ferry::cli;
 
+    // Первой строкой и до всего остального: на Windows здесь поднимается
+    // Winsock, консоль переводится в UTF-8 и включается обработка ANSI.
+    // Любой printf до этого напечатал бы кириллицу мусором.
+    ferry::platform::init();
     installSignalHandlers();
 
-    const Options options = Options::parse(argc, argv);
+    const Options options = Options::parse(ferry::platform::arguments(argc, argv));
     if (!options.error.empty()) {
         std::fprintf(stderr, "%s\n\nЗапустите `ferry help`.\n", options.error.c_str());
         return 2;

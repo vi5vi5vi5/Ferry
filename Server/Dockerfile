@@ -95,7 +95,60 @@ RUN mkdir -p /out/dl \
  && cd /out/dl && sha256sum ferry-linux-* > SHA256SUMS \
  && cat SHA256SUMS
 
-# ---------- 3. Рантайм ----------
+# ---------- 3. Клиент под Windows ----------
+# Кросс-компиляция MinGW-w64 прямо здесь, а не на отдельной машине с
+# Visual Studio: релей обязан раздавать и ferry.exe тоже, а держать
+# ради этого вторую сборочную машину и ручную выкладку релизов — это
+# ровно то, чего мы избегали в линуксовой ветке.
+FROM debian:bookworm AS build-client-windows
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        ninja-build \
+        mingw-w64 \
+        perl \
+        git \
+        ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# OpenSSL для MinGW собирается из исходников: готового пакета под эту цель
+# в Debian нет. Тег вынесен в аргумент — обновление безопасности берётся
+# его сменой и пересборкой, больше ничего делать не нужно.
+#
+# no-shared: у клиента не должно быть рядом лежащих DLL, весь смысл в том,
+# что это один файл. no-tests и no-docs — чтобы не собирать то, что мы всё
+# равно не запустим. Ассемблер НЕ отключаем: без него AES-GCM теряет
+# AES-NI и становится в разы медленнее, а мы им шифруем весь поток.
+ARG OPENSSL_TAG=openssl-3.5.8
+RUN git clone --depth 1 --branch "${OPENSSL_TAG}" https://github.com/openssl/openssl.git /tmp/openssl \
+ && cd /tmp/openssl \
+ && ./Configure mingw64 no-shared no-tests no-docs \
+        --prefix=/opt/openssl-win --cross-compile-prefix=x86_64-w64-mingw32- \
+ && make -j"$(nproc)" \
+ && make install_sw \
+ && rm -rf /tmp/openssl
+
+WORKDIR /src
+COPY . .
+
+ARG GIT_COMMIT=unknown
+
+RUN cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake \
+        -DFERRY_WIN_DEPS=/opt/openssl-win \
+        -DFERRY_STATIC_OPENSSL=ON \
+        -DFERRY_BUILD_TESTS=OFF \
+        -DFERRY_COMMIT="${GIT_COMMIT}" \
+ && cmake --build build-win
+
+RUN mkdir -p /out/dl \
+ && cp build-win/Cli/ferry.exe /out/dl/ferry-windows-x86_64.exe \
+ && cd /out/dl && sha256sum ferry-windows-x86_64.exe > SHA256SUMS.windows \
+ && cat SHA256SUMS.windows
+
+# ---------- 4. Рантайм ----------
 FROM debian:bookworm-slim AS runtime
 
 # Только рантайм-библиотеки Qt6. libqt6websockets6 тянет за собой Network
@@ -116,6 +169,14 @@ WORKDIR /app
 COPY --from=build-server /src/build-server/FerryServer /app/FerryServer
 COPY Server/web /app/web
 COPY --from=build-client /out/dl /app/web/dl
+COPY --from=build-client-windows /out/dl /app/web/dl
+
+# Общий список контрольных сумм. Установщики (install.sh и install.ps1)
+# читают один и тот же файл и сверяют по нему то, что скачали: бинарь,
+# который человек сейчас запустит, — не то место, где уместно «ну и ладно».
+RUN cat /app/web/dl/SHA256SUMS.windows >> /app/web/dl/SHA256SUMS \
+ && rm /app/web/dl/SHA256SUMS.windows \
+ && cat /app/web/dl/SHA256SUMS
 
 # HTTP и WebSocket — один порт: сервер сам опознаёт запрос на смену
 # протокола. Наружу его публикует nginx по https и wss (см. proxy/).

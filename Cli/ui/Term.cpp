@@ -6,8 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <sys/ioctl.h>
-#include <unistd.h>
+#include "Cli/platform/Platform.h"
 
 namespace ferry::ui {
 namespace {
@@ -67,20 +66,21 @@ std::string fixed1(double v)
 
 bool isTty()
 {
-    return ::isatty(STDOUT_FILENO) == 1;
+    return platform::consoleIsTty();
 }
 
 int width()
 {
-    winsize ws{};
-    if (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 20)
-        return int(ws.ws_col);
-    return 80;
+    return platform::consoleWidth();
 }
 
 bool colorEnabled()
 {
-    static const bool enabled = isTty() && !envDisablesColor();
+    // Считается один раз: platform::init к этому моменту уже отработал и
+    // включил обработку ANSI на Windows, а менять решение посреди вывода
+    // всё равно нельзя — панель перерисовывается на месте, и смена режима
+    // оставила бы на экране мусор.
+    static const bool enabled = platform::consoleSupportsAnsi() && !envDisablesColor();
     return enabled;
 }
 

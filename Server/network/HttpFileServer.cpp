@@ -189,7 +189,8 @@ void HttpFileServer::serveFile(QTcpSocket *socket, const HttpRequest &req)
     // с сервером, и человек, поймавший суточный кэш, получил бы клиента от
     // прошлой версии протокола.
     const bool volatileAsset = rel.startsWith(QLatin1String("/dl/"))
-                               || rel == QLatin1String("/install.sh");
+                               || rel == QLatin1String("/install.sh")
+                               || rel == QLatin1String("/install.ps1");
     const QByteArray cache = (!volatileAsset && rel.startsWith(QLatin1String("/assets/")))
                                  ? QByteArrayLiteral("public, max-age=86400")
                                  : QByteArrayLiteral("no-store");
@@ -203,7 +204,7 @@ void HttpFileServer::serveFile(QTcpSocket *socket, const HttpRequest &req)
     //
     // Адрес берём из заголовка Host, а не из настроек: за прокси сервер
     // своего внешнего имени не знает, а Host — знает всегда.
-    if (rel == QLatin1String("/install.sh")) {
+    if (rel == QLatin1String("/install.sh") || rel == QLatin1String("/install.ps1")) {
         QByteArray host = req.header(QByteArrayLiteral("host"));
         if (host.isEmpty())
             host = QByteArrayLiteral("localhost");
@@ -303,6 +304,11 @@ QByteArray HttpFileServer::mimeFor(const QString &path)
     // именно text/plain, а не x-shellscript: браузер должен показать, а не
     // предложить скачать.
     if (path.endsWith(QLatin1String(".sh")))    return "text/plain; charset=utf-8";
+    // charset у .ps1 — не формальность. `irm … | iex` декодирует ответ
+    // ровно по этому заголовку, и без него PowerShell 5.1 прочитает
+    // кириллицу в кодировке системы, то есть превратит её в мусор ещё до
+    // того, как скрипт начнёт выполняться.
+    if (path.endsWith(QLatin1String(".ps1")))   return "text/plain; charset=utf-8";
     if (path.endsWith(QLatin1String(".txt")))   return "text/plain; charset=utf-8";
     return "application/octet-stream";
 }

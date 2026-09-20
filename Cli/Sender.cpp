@@ -7,12 +7,9 @@
 #include <string>
 #include <vector>
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include "Cli/Signals.h"
 #include "Cli/net/WebSocketClient.h"
+#include "Cli/platform/Platform.h"
 #include "Cli/ui/LivePanel.h"
 #include "Cli/ui/Qr.h"
 #include "Cli/ui/Term.h"
@@ -100,12 +97,12 @@ int runSend(const Options &options, const Relay &relay)
     using namespace ferry::ui;
 
     // ---- 1. Открываем файл ----
-    struct stat st{};
-    if (::stat(options.path.c_str(), &st) != 0) {
+    platform::FileInfo info;
+    if (!platform::fileStat(options.path, info)) {
         std::fprintf(stderr, "Не нашёл файл: %s\n", options.path.c_str());
         return 1;
     }
-    if (S_ISDIR(st.st_mode)) {
+    if (info.isDirectory) {
         std::fprintf(stderr,
                      "%s — это папка. Папки Ferry научится возить в следующей версии;\n"
                      "пока упакуйте её, например: tar -C %s -cf - . | zstd -o папка.tar.zst\n",
@@ -113,24 +110,24 @@ int runSend(const Options &options, const Relay &relay)
         return 1;
     }
 
-    const int fd = ::open(options.path.c_str(), O_RDONLY);
-    if (fd < 0) {
+    const platform::File fd = platform::fileOpenRead(options.path);
+    if (fd == platform::kInvalidFile) {
         std::fprintf(stderr, "Не смог открыть %s\n", options.path.c_str());
         return 1;
     }
 
-    const uint64_t total = uint64_t(st.st_size);
+    const uint64_t total = info.size;
     const ChunkPlan plan = planFor(total);
     if (!plan.valid()) {
         std::fprintf(stderr, "Не понял размер файла.\n");
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
 
     const std::string name = safeFileName(baseName(options.path));
     if (name.empty()) {
         std::fprintf(stderr, "Из имени файла не получилось ничего пригодного.\n");
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
 
@@ -156,11 +153,11 @@ int runSend(const Options &options, const Relay &relay)
         const int64_t startedMs = nowMs();
         for (uint64_t i = 0; i < plan.chunkCount; ++i) {
             const uint32_t len = plan.sizeOf(i);
-            ssize_t got = ::pread(fd, buffer.data(), len, off_t(plan.offsetOf(i)));
-            if (got != ssize_t(len)) {
+            const int64_t got = platform::fileReadAt(fd, buffer.data(), len, plan.offsetOf(i));
+            if (got != int64_t(len)) {
                 panel.finish();
                 std::fprintf(stderr, "\nФайл читается не целиком — он изменился прямо сейчас?\n");
-                ::close(fd);
+                platform::fileClose(fd);
                 return 1;
             }
             hashes.append(blake3(buffer.data(), size_t(len)));
@@ -173,7 +170,7 @@ int runSend(const Options &options, const Relay &relay)
             }
             if (stopRequested()) {
                 panel.finish();
-                ::close(fd);
+                platform::fileClose(fd);
                 return 130;
             }
         }
@@ -188,7 +185,7 @@ int runSend(const Options &options, const Relay &relay)
     if (!ok) {
         std::fprintf(stderr, "Системный генератор случайных чисел недоступен — "
                              "продолжать нельзя.\n");
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
     const TransferKeys keys = TransferKeys::derive(master);
@@ -196,7 +193,7 @@ int runSend(const Options &options, const Relay &relay)
     Bytes noncePrefix;
     if (!randomBytes(noncePrefix, kNoncePrefixSize)) {
         std::fprintf(stderr, "Системный генератор случайных чисел недоступен.\n");
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
 
@@ -215,7 +212,7 @@ int runSend(const Options &options, const Relay &relay)
         || !sealChunk(keys.meta, noncePrefix.data(), kMetaLabelHashList, plan.chunkCount,
                       rawHashes.data(), rawHashes.size(), encHashes)) {
         std::fprintf(stderr, "Не удалось зашифровать метаданные.\n");
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
 
@@ -224,7 +221,7 @@ int runSend(const Options &options, const Relay &relay)
     std::string err;
     if (!apiCreateTransfer(relay, created, &err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
 
@@ -257,7 +254,7 @@ int runSend(const Options &options, const Relay &relay)
     if (!ws.connectTo(relay.host, relay.port, relay.tls, relay.insecure, std::string(kWsPath),
                       20000, &err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
 
@@ -316,7 +313,7 @@ int runSend(const Options &options, const Relay &relay)
                 std::fprintf(stderr, "%s\n", explainError(reason).c_str());
             else
                 std::fprintf(stderr, "Соединение оборвалось: %s\n", ws.error().c_str());
-            ::close(fd);
+            platform::fileClose(fd);
             return 1;
         }
         net::WsMessage msg;
@@ -331,14 +328,14 @@ int runSend(const Options &options, const Relay &relay)
                 rememberNeed(v);
             } else if (type == "error") {
                 std::fprintf(stderr, "%s\n", explainError(v["reason"].toString()).c_str());
-                ::close(fd);
+                platform::fileClose(fd);
                 return 1;
             }
         }
     }
     if (!accepted) {
         std::fprintf(stderr, "Сервер не подтвердил раздачу.\n");
-        ::close(fd);
+        platform::fileClose(fd);
         return 1;
     }
 
@@ -433,8 +430,9 @@ int runSend(const Options &options, const Relay &relay)
         while (int64_t(nextToSend) <= needUpTo && nextToSend < plan.chunkCount
                && ws.pendingBytes() < kOutgoingHighWater) {
             const uint32_t len = plan.sizeOf(nextToSend);
-            const ssize_t got = ::pread(fd, buffer.data(), len, off_t(plan.offsetOf(nextToSend)));
-            if (got != ssize_t(len)) {
+            const int64_t got =
+                platform::fileReadAt(fd, buffer.data(), len, plan.offsetOf(nextToSend));
+            if (got != int64_t(len)) {
                 failed = true;
                 failure = "файл перестал читаться — его изменили или удалили во время раздачи";
                 break;
@@ -488,7 +486,7 @@ int runSend(const Options &options, const Relay &relay)
     }
 
     panel.finish();
-    ::close(fd);
+    platform::fileClose(fd);
     ws.closeGracefully();
 
     if (failed) {

@@ -33,7 +33,7 @@ bool writeAll(TlsSocket &socket, const std::string &data, int timeoutMs, std::st
         if (n == 0) {
             bool ready = false;
             const bool forRead = socket.wantRead();
-            if (!waitFor(socket.fd(), forRead, !forRead, timeoutMs, forRead ? &ready : nullptr,
+            if (!waitFor(socket.handle(), forRead, !forRead, timeoutMs, forRead ? &ready : nullptr,
                          forRead ? nullptr : &ready)
                 || !ready) {
                 if (err)
@@ -93,7 +93,7 @@ bool httpRequest(const HttpTarget &target, const std::string &method, const std:
         if (n == 0) {
             bool ready = false;
             const bool forWrite = socket.wantWrite();
-            if (!waitFor(socket.fd(), !forWrite, forWrite, timeoutMs, forWrite ? nullptr : &ready,
+            if (!waitFor(socket.handle(), !forWrite, forWrite, timeoutMs, forWrite ? nullptr : &ready,
                          forWrite ? &ready : nullptr)
                 || !ready) {
                 if (err)

@@ -4,15 +4,22 @@
 #include <cstdint>
 #include <string>
 
+#include "Cli/platform/Platform.h"
+
 // TCP + TLS на OpenSSL. Один сокет, неблокирующий после установки
 // соединения.
 //
 // Почему неблокирующий, хотя клиент однопоточный: отправителю надо
 // одновременно лить чанки и слушать команды сервера. На блокирующей записи
-// мы бы залипли в SSL_write с полным буфером и не прочитали бы очередной
-// need — а именно он говорит, что слать дальше. Поэтому наружу торчит
-// честный fd и явные флаги «жду чтения / жду записи», а цикл событий
-// (poll) живёт этажом выше, в WebSocketClient.
+// мы бы залипли с полным буфером и не прочитали бы очередной need — а
+// именно он говорит, что слать дальше. Поэтому наружу торчит дескриптор и
+// явные флаги «жду чтения / жду записи», а цикл событий живёт этажом выше,
+// в WebSocketClient.
+//
+// Всё, что отличается между Linux и Windows, вынесено в platform::.
+// Здесь остаётся только OpenSSL — один и тот же на обеих системах, и это
+// не экономия усилий, а требование: вторая реализация криптографии
+// означала бы вторую возможность разойтись в форматах.
 namespace ferry::net {
 
 class TlsSocket
@@ -32,8 +39,8 @@ public:
     // утекает (он никогда не уходит с устройства), но подменённый сервер
     // может выдать чужой том — поэтому вызывающий обязан сказать об этом
     // человеку вслух.
-    bool connectTo(const std::string &host, uint16_t port, bool tls, bool insecure,
-                   int timeoutMs, std::string *err);
+    bool connectTo(const std::string &host, uint16_t port, bool tls, bool insecure, int timeoutMs,
+                   std::string *err);
 
     // >0 — прочитано байт; 0 — сейчас данных нет (см. wantRead/wantWrite);
     // -1 — соединение кончилось или сломалось.
@@ -46,8 +53,8 @@ public:
     bool wantRead() const { return m_wantRead; }
     bool wantWrite() const { return m_wantWrite; }
 
-    int fd() const { return m_fd; }
-    bool isOpen() const { return m_fd >= 0; }
+    platform::Socket handle() const { return m_socket; }
+    bool isOpen() const { return m_socket != platform::kInvalidSocket; }
 
     void close();
 
@@ -55,13 +62,11 @@ public:
     const std::string &error() const { return m_error; }
 
 private:
-    bool doConnect(const std::string &host, uint16_t port, int timeoutMs, std::string *err);
     bool doHandshake(const std::string &host, bool insecure, int timeoutMs, std::string *err);
-    void setNonBlocking();
 
-    int m_fd = -1;
-    void *m_ssl = nullptr;      // SSL*
-    void *m_ctx = nullptr;      // SSL_CTX*
+    platform::Socket m_socket = platform::kInvalidSocket;
+    void *m_ssl = nullptr;   // SSL*
+    void *m_ctx = nullptr;   // SSL_CTX*
     bool m_tls = false;
     bool m_wantRead = false;
     bool m_wantWrite = false;
@@ -70,6 +75,7 @@ private:
 
 // Подождать готовности сокета. timeoutMs < 0 — ждать сколько угодно.
 // Возвращает true, если что-то произошло (или таймаут вышел без ошибки).
-bool waitFor(int fd, bool forRead, bool forWrite, int timeoutMs, bool *readable, bool *writable);
+bool waitFor(platform::Socket s, bool forRead, bool forWrite, int timeoutMs, bool *readable,
+             bool *writable);
 
 } // namespace ferry::net

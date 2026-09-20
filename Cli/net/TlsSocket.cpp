@@ -1,15 +1,6 @@
 #include "Cli/net/TlsSocket.h"
 
-#include <cerrno>
 #include <cstring>
-
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -46,105 +37,15 @@ void initOpenSsl()
 
 } // namespace
 
-bool waitFor(int fd, bool forRead, bool forWrite, int timeoutMs, bool *readable, bool *writable)
+bool waitFor(platform::Socket s, bool forRead, bool forWrite, int timeoutMs, bool *readable,
+             bool *writable)
 {
-    if (readable)
-        *readable = false;
-    if (writable)
-        *writable = false;
-    if (fd < 0)
-        return false;
-
-    pollfd p{};
-    p.fd = fd;
-    p.events = short((forRead ? POLLIN : 0) | (forWrite ? POLLOUT : 0));
-
-    int rc;
-    do {
-        rc = ::poll(&p, 1, timeoutMs);
-    } while (rc < 0 && errno == EINTR);   // Ctrl-C и прочие сигналы — не ошибка
-
-    if (rc < 0)
-        return false;
-    if (rc == 0)
-        return true;   // просто таймаут
-
-    if (readable)
-        *readable = (p.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
-    if (writable)
-        *writable = (p.revents & (POLLOUT | POLLERR)) != 0;
-    return true;
+    return platform::waitSocket(s, forRead, forWrite, timeoutMs, readable, writable);
 }
 
 TlsSocket::~TlsSocket()
 {
     close();
-}
-
-void TlsSocket::setNonBlocking()
-{
-    const int flags = ::fcntl(m_fd, F_GETFL, 0);
-    if (flags >= 0)
-        ::fcntl(m_fd, F_SETFL, flags | O_NONBLOCK);
-}
-
-bool TlsSocket::doConnect(const std::string &host, uint16_t port, int timeoutMs, std::string *err)
-{
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;      // и IPv4, и IPv6
-    hints.ai_socktype = SOCK_STREAM;
-
-    addrinfo *res = nullptr;
-    const std::string portText = std::to_string(port);
-    const int rc = ::getaddrinfo(host.c_str(), portText.c_str(), &hints, &res);
-    if (rc != 0 || !res) {
-        if (err)
-            *err = "не удалось разрешить имя " + host + ": " + gai_strerror(rc);
-        return false;
-    }
-
-    std::string lastError = "нет подходящих адресов";
-    for (addrinfo *a = res; a; a = a->ai_next) {
-        m_fd = ::socket(a->ai_family, a->ai_socktype, a->ai_protocol);
-        if (m_fd < 0)
-            continue;
-
-        setNonBlocking();
-        int rcConnect = ::connect(m_fd, a->ai_addr, a->ai_addrlen);
-        if (rcConnect < 0 && errno == EINPROGRESS) {
-            bool writable = false;
-            if (waitFor(m_fd, false, true, timeoutMs, nullptr, &writable) && writable) {
-                int soErr = 0;
-                socklen_t len = sizeof(soErr);
-                if (::getsockopt(m_fd, SOL_SOCKET, SO_ERROR, &soErr, &len) == 0 && soErr == 0)
-                    rcConnect = 0;
-                else
-                    lastError = std::strerror(soErr ? soErr : ETIMEDOUT);
-            } else {
-                lastError = "таймаут соединения";
-            }
-        } else if (rcConnect < 0) {
-            lastError = std::strerror(errno);
-        }
-
-        if (rcConnect == 0) {
-            ::freeaddrinfo(res);
-            // Наши сообщения мелкие и частые (need, ack), а чанки крупные.
-            // Алгоритм Нэйгла склеивал бы мелкие в пакеты по 200 мс, и
-            // управление ползло бы вслед за данными.
-            int one = 1;
-            ::setsockopt(m_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-            return true;
-        }
-
-        ::close(m_fd);
-        m_fd = -1;
-    }
-
-    ::freeaddrinfo(res);
-    if (err)
-        *err = "не удалось соединиться с " + host + ": " + lastError;
-    return false;
 }
 
 bool TlsSocket::doHandshake(const std::string &host, bool insecure, int timeoutMs, std::string *err)
@@ -196,7 +97,9 @@ bool TlsSocket::doHandshake(const std::string &host, bool insecure, int timeoutM
         }
     }
 
-    SSL_set_fd(ssl, m_fd);
+    // SSL_set_fd принимает int и на Windows тоже: дескрипторы сокетов там
+    // хоть и UINT_PTR, но помещаются в int — так делает и сам OpenSSL.
+    SSL_set_fd(ssl, int(m_socket));
 
     for (;;) {
         const int rc = SSL_connect(ssl);
@@ -207,7 +110,7 @@ bool TlsSocket::doHandshake(const std::string &host, bool insecure, int timeoutM
         if (sslErr == SSL_ERROR_WANT_READ || sslErr == SSL_ERROR_WANT_WRITE) {
             bool ready = false;
             const bool forRead = (sslErr == SSL_ERROR_WANT_READ);
-            if (!waitFor(m_fd, forRead, !forRead, timeoutMs, forRead ? &ready : nullptr,
+            if (!waitFor(m_socket, forRead, !forRead, timeoutMs, forRead ? &ready : nullptr,
                          forRead ? nullptr : &ready)
                 || !ready) {
                 if (err)
@@ -238,8 +141,10 @@ bool TlsSocket::connectTo(const std::string &host, uint16_t port, bool tls, bool
     close();
     m_tls = tls;
 
-    if (!doConnect(host, port, timeoutMs, err))
+    m_socket = platform::connectTcp(host, port, timeoutMs, err);
+    if (m_socket == platform::kInvalidSocket)
         return false;
+
     if (tls && !doHandshake(host, insecure, timeoutMs, err)) {
         close();
         return false;
@@ -250,22 +155,23 @@ bool TlsSocket::connectTo(const std::string &host, uint16_t port, bool tls, bool
 int TlsSocket::read(void *buf, size_t len)
 {
     m_wantRead = m_wantWrite = false;
-    if (m_fd < 0 || len == 0)
+    if (!isOpen() || len == 0)
         return -1;
 
     if (!m_tls) {
-        const ssize_t n = ::recv(m_fd, buf, len, 0);
+        const int n = platform::recvSocket(m_socket, buf, len);
         if (n > 0)
-            return int(n);
+            return n;
         if (n == 0) {
             m_error = "соединение закрыто другой стороной";
             return -1;
         }
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        const int e = platform::lastNetError();
+        if (platform::wouldBlock(e) || platform::interrupted(e)) {
             m_wantRead = true;
             return 0;
         }
-        m_error = std::strerror(errno);
+        m_error = platform::netErrorText(e);
         return -1;
     }
 
@@ -284,13 +190,15 @@ int TlsSocket::read(void *buf, size_t len)
     case SSL_ERROR_ZERO_RETURN:
         m_error = "соединение закрыто другой стороной";
         return -1;
-    case SSL_ERROR_SYSCALL:
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+    case SSL_ERROR_SYSCALL: {
+        const int e = platform::lastNetError();
+        if (platform::wouldBlock(e) || platform::interrupted(e)) {
             m_wantRead = true;
             return 0;
         }
-        m_error = errno ? std::strerror(errno) : "соединение оборвалось";
+        m_error = e ? platform::netErrorText(e) : std::string("соединение оборвалось");
         return -1;
+    }
     default:
         m_error = opensslError();
         return -1;
@@ -300,20 +208,21 @@ int TlsSocket::read(void *buf, size_t len)
 int TlsSocket::write(const void *buf, size_t len)
 {
     m_wantRead = m_wantWrite = false;
-    if (m_fd < 0)
+    if (!isOpen())
         return -1;
     if (len == 0)
         return 0;
 
     if (!m_tls) {
-        const ssize_t n = ::send(m_fd, buf, len, MSG_NOSIGNAL);
+        const int n = platform::sendSocket(m_socket, buf, len);
         if (n > 0)
-            return int(n);
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            return n;
+        const int e = platform::lastNetError();
+        if (platform::wouldBlock(e) || platform::interrupted(e)) {
             m_wantWrite = true;
             return 0;
         }
-        m_error = std::strerror(errno);
+        m_error = platform::netErrorText(e);
         return -1;
     }
 
@@ -333,13 +242,15 @@ int TlsSocket::write(const void *buf, size_t len)
     case SSL_ERROR_ZERO_RETURN:
         m_error = "соединение закрыто другой стороной";
         return -1;
-    case SSL_ERROR_SYSCALL:
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+    case SSL_ERROR_SYSCALL: {
+        const int e = platform::lastNetError();
+        if (platform::wouldBlock(e) || platform::interrupted(e)) {
             m_wantWrite = true;
             return 0;
         }
-        m_error = errno ? std::strerror(errno) : "соединение оборвалось";
+        m_error = e ? platform::netErrorText(e) : std::string("соединение оборвалось");
         return -1;
+    }
     default:
         m_error = opensslError();
         return -1;
@@ -358,9 +269,9 @@ void TlsSocket::close()
         SSL_CTX_free(static_cast<SSL_CTX *>(m_ctx));
         m_ctx = nullptr;
     }
-    if (m_fd >= 0) {
-        ::close(m_fd);
-        m_fd = -1;
+    if (m_socket != platform::kInvalidSocket) {
+        platform::closeSocket(m_socket);
+        m_socket = platform::kInvalidSocket;
     }
 }
 
