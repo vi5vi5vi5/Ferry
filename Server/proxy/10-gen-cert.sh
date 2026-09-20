@@ -23,7 +23,7 @@ if [ ! -f "$SELF_DIR/fullchain.pem" ] || [ ! -f "$SELF_DIR/privkey.pem" ]; then
     echo "Генерация самоподписанного сертификата (10 лет)..."
     mkdir -p "$SELF_DIR"
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-        -subj "/CN=MeetUp" \
+        -subj "/CN=Ferry" \
         -keyout "$SELF_DIR/privkey.pem" -out "$SELF_DIR/fullchain.pem"
 fi
 

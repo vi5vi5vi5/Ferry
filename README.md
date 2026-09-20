@@ -74,6 +74,22 @@ cd Ferry/Server
 
 Домен запоминается: дальше хватает `./tools/update.sh` без флагов.
 
+#### Если на сервере уже что-то живёт
+
+Порты 80 и 443 может занимать другой сервис. Ferry это заметит до сборки и
+скажет, кто их держит; дайте ему свои:
+
+```bash
+./tools/update.sh --force --https-port 8443 --http-port 8081
+```
+
+Релей ответит по адресу `https://<ip-сервера>:8443/`. Порты тоже запоминаются.
+
+Такой релей живёт на самоподписанном сертификате, поэтому клиентам на обоих
+концах понадобится `--insecure` (установщики пропишут это сами). Когда дойдут
+руки до домена — можно завести поддомен и отдать TLS уже существующему nginx,
+а Ferry запускать без своего прокси.
+
 ### Поставить клиент
 
 **Клиент раздаёт сам релей.** Не нужно ходить на GitHub за релизами, и версия
@@ -104,10 +120,16 @@ curl -fsSLk https://<ip>/install.sh | sh -s -- --insecure
 ```
 
 ```powershell
-$env:FERRY_INSECURE = '1'
-[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-irm https://<ip>/install.ps1 | iex
+Add-Type 'using System.Net;public class FerryTls{public static void Ok(){ServicePointManager.ServerCertificateValidationCallback=delegate{return true;};}}'
+[FerryTls]::Ok(); $env:FERRY_INSECURE = '1'
+irm https://<ip>:8443/install.ps1 | iex
 ```
+
+Три строки, и именно в таком виде. Привычный однострочник с
+`ServerCertificateValidationCallback = { $true }` в Windows PowerShell 5.1
+**ломает `Invoke-WebRequest`**: колбэк вызывается из фонового потока, где нет
+пространства выполнения PowerShell, падает — и наружу выходит бессмысленное
+«Непредвиденная ошибка при передаче». Настоящий делегат .NET этой беды лишён.
 
 ### Перевезти
 

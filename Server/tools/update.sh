@@ -99,6 +99,67 @@ else
     echo "  Есть домен? ./tools/update.sh --force --domain ваш-домен --email вы@почта"
 fi
 
+# ---- Порты: заняты ли они кем-то посторонним ----
+#
+# Самая частая беда при втором сервисе на одном сервере: на 80 и 443 уже
+# сидит чужой nginx (например от MeetUp), docker compose падает с
+# «address already in use», а человек остаётся с наполовину поднятым
+# стеком и невнятной строкой в выводе. Сказать об этом ДО сборки стоит
+# десяти строк.
+#
+# Наши же контейнеры от прошлого запуска — не помеха: compose их
+# пересоздаст. Поэтому их из проверки исключаем.
+port_owner() {
+    local port="$1" id name
+    for id in $(docker ps -q 2>/dev/null); do
+        if docker port "$id" 2>/dev/null | grep -qE ":${port}\$"; then
+            case " ${OUR_CONTAINERS} " in
+                *" ${id} "*) echo "__ours__"; return 0 ;;
+            esac
+            name="$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's|^/||')"
+            echo "${name:-другой контейнер}"
+            return 0
+        fi
+    done
+    if command -v ss >/dev/null 2>&1; then
+        if ss -Hltn 2>/dev/null | grep -qE "[:.]${port}[[:space:]]"; then
+            echo "__system__"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+OUR_CONTAINERS="$(docker compose ps -q 2>/dev/null | tr '\n' ' ' || true)"
+CONFLICT=0
+for spec in "HTTPS:${HTTPS_PORT:-443}" "HTTP:${HTTP_PORT:-80}"; do
+    label="${spec%%:*}"
+    port="${spec##*:}"
+    owner="$(port_owner "$port" || true)"
+    [[ -z "$owner" || "$owner" == "__ours__" ]] && continue
+    if [[ "$owner" == "__system__" ]]; then
+        echo "Порт $port ($label) уже занят каким-то процессом на этом сервере." >&2
+    else
+        echo "Порт $port ($label) уже занят контейнером ${owner}." >&2
+    fi
+    CONFLICT=1
+done
+
+if [[ "$CONFLICT" -eq 1 ]]; then
+    cat >&2 <<'HINT'
+
+Так бывает, когда на сервере уже живёт другой сервис — например MeetUp.
+Дайте Ferry свои порты:
+
+  ./tools/update.sh --force --https-port 8443 --http-port 8081
+
+Они запомнятся в .env, дальше флаги указывать не нужно, а релей будет
+отвечать по адресу https://<ip-сервера>:8443/
+
+HINT
+    exit 1
+fi
+
 echo
 echo "=== 1/3 Получение новой версии из GitHub ==="
 OLD_REV="$(git rev-parse HEAD 2>/dev/null || echo none)"

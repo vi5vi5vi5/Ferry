@@ -16,10 +16,17 @@
 #      Remove-Item -Recurse "$env:APPDATA\ferry"
 #      (и убрать каталог из PATH в «Переменные среды»)
 #
-#  Сертификат релея самоподписанный? Тогда так:
-#      $env:FERRY_INSECURE = '1'
-#      [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+#  Сертификат релея самоподписанный (у релея ещё нет домена)? Тогда так —
+#  три строки, и именно в таком виде:
+#
+#      Add-Type 'using System.Net;public class FerryTls{public static void Ok(){ServicePointManager.ServerCertificateValidationCallback=delegate{return true;};}}'
+#      [FerryTls]::Ok(); $env:FERRY_INSECURE = '1'
 #      irm https://<релей>/install.ps1 | iex
+#
+#  Привычный однострочник с { $true } вместо Add-Type здесь НЕ РАБОТАЕТ:
+#  Invoke-WebRequest зовёт колбэк из фонового потока, где нет пространства
+#  выполнения PowerShell, и падает с бессмысленным «Непредвиденная ошибка
+#  при передаче».
 # ============================================================
 param(
     [switch]$Insecure,
@@ -49,9 +56,24 @@ if ($Insecure) {
     Write-Host "Так бывает, пока у релея нет домена. Посредник в сети может выдать"
     Write-Host "себя за него. Когда домен появится, это станет не нужно."
     Write-Host ""
+
+    # Проверку отключаем НАСТОЯЩИМ делегатом .NET, а не скриптблоком.
+    #
+    # Всем известный однострочник
+    #     [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    # в Windows PowerShell 5.1 ломает Invoke-WebRequest: колбэк вызывается
+    # из фонового потока, где нет пространства выполнения PowerShell,
+    # скриптблок падает — а наружу выходит «Непредвиденная ошибка при
+    # передаче», по которой догадаться не о чем. Проверено, не теория.
     try {
-        [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-    } catch { }
+        if (-not ([System.Management.Automation.PSTypeName]'FerryTlsTrustAll').Type) {
+            Add-Type 'using System.Net;public class FerryTlsTrustAll{public static void Enable(){ServicePointManager.ServerCertificateValidationCallback=delegate{return true;};}}'
+        }
+        [FerryTlsTrustAll]::Enable()
+    } catch {
+        Write-Host "Не удалось отключить проверку сертификата: $($_.Exception.Message)" -ForegroundColor Red
+        return
+    }
 }
 
 # ---- 1. Архитектура ----
@@ -93,8 +115,8 @@ try {
         Write-Host "Если ответ 404 — на релее нет сборки под Windows. Обновите релей:"
         Write-Host "  cd Ferry/Server && ./tools/update.sh --force"
         Write-Host "Если ошибка про сертификат — у релея его ещё нет, попробуйте так:"
-        Write-Host "  `$env:FERRY_INSECURE = '1'"
-        Write-Host "  [Net.ServicePointManager]::ServerCertificateValidationCallback = { `$true }"
+        Write-Host "  Add-Type 'using System.Net;public class FerryTls{public static void Ok(){ServicePointManager.ServerCertificateValidationCallback=delegate{return true;};}}'"
+        Write-Host "  [FerryTls]::Ok(); `$env:FERRY_INSECURE = '1'"
         Write-Host "  irm $Base/install.ps1 | iex"
         return
     }
