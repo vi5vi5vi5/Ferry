@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QJsonArray>
 #include <QObject>
 #include <QSet>
 
@@ -15,7 +16,7 @@ struct ServerConfig;
 // Ядро релея. Принимает WebSocket-соединения на /wsf, заворачивает каждое в
 // ClientSession и маршрутизирует сообщения:
 //
-//   текст (JSON)  — управление: offer / hello / ack / bye;
+//   текст (JSON)  — управление: offer / hello / ack / have / request / bye;
 //   бинарь        — чанки от отправителя, которые тут же уезжают получателям.
 //
 // Сервер никогда не заглядывает внутрь чанка: у него шифротекст и тег GCM,
@@ -53,6 +54,18 @@ private:
     void handleOffer(ClientSession *session, const QJsonObject &msg);
     void handleHello(ClientSession *session, const QJsonObject &msg);
     void handleAck(ClientSession *session, const QJsonObject &msg);
+    void handleHave(ClientSession *session, const QJsonObject &msg);
+    void handleRequest(ClientSession *session, const QJsonObject &msg);
+
+    // Что умеет ЭТОТ сервер. Уезжает в offer_ok и hello_ok, и клиент по
+    // нему решает, какие сообщения вообще посылать.
+    //
+    // Объявление нужно из-за строгости разбора: неизвестное сообщение —
+    // это bad_message, а не «промолчу». Строгость правильная (мусор на
+    // проводе должен быть виден сразу), но за неё приходится платить
+    // честным ответом на вопрос «а ты меня поймёшь». Без него новый
+    // клиент, встретив старый релей, получал бы отказ на первом же have.
+    static QJsonArray serverFeatures();
     void sendError(ClientSession *session, const char *reason, bool closeAfter = true);
 
     // Сравнение без утечки по времени. Токен владельца и доказательство

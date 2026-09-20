@@ -40,6 +40,37 @@ uint64_t readBe64(const uint8_t *p)
     return v;
 }
 
+// Диапазоны в JSON: [[a,b],[c,d]], границы включительные с обеих сторон.
+//
+// Ровно то же самое сервер делает своим QJsonArray. Две реализации здесь
+// неизбежны — у ядра нет ни json::Value, ни Qt одновременно, — а вот
+// трактовка границ обязана быть одна, и она живёт в ferry::ChunkSet.
+json::Value rangesToJson(const std::vector<ChunkRange> &ranges)
+{
+    json::Value arr = json::Value::array();
+    for (const ChunkRange &r : ranges) {
+        json::Value pair = json::Value::array();
+        pair.push(json::Value::make(int64_t(r.from)));
+        pair.push(json::Value::make(int64_t(r.to)));
+        arr.push(std::move(pair));
+    }
+    return arr;
+}
+
+// Объявил ли собеседник возможность. Молчание — это «не умеет»: релей
+// раздаёт свою версию клиента, но человек вполне мог принести старую, и
+// заговорить с ней на языке, которого она не знает, значит получить от
+// неё bad_message на ровном месте.
+bool announces(const json::Value &msg, const char *feature)
+{
+    const json::Value &arr = msg["features"];
+    for (size_t i = 0; i < arr.size(); ++i) {
+        if (arr.at(i).toString() == feature)
+            return true;
+    }
+    return false;
+}
+
 // Карта принятых чанков рядом с недокачанным файлом.
 //
 // Пишется уже сейчас, хотя в M1 чанки приходят по порядку и хватило бы
@@ -115,6 +146,10 @@ public:
     // Сколько чанков подряд есть с начала. В M1 этого хватает и серверу:
     // он просто ставит курсор получателя на это место.
     uint64_t havePrefix() const { return m_set.prefix(); }
+
+    // Само множество — для сообщений have и request: серверу нужны
+    // диапазоны, а не одно число.
+    const ferry::ChunkSet &set() const { return m_set; }
 
     bool flush() const
     {
@@ -483,6 +518,16 @@ int runGet(const Options &options)
         // Докуда мы уже дошли. Сервер поставит курсор сюда и не будет
         // присылать то, что у нас есть.
         hello.set("have_upto", json::Value::make(int64_t(map.havePrefix())));
+        // И то же самое диапазонами. Обе формы вместе, а не вместо:
+        // have_upto понимает релей M1, диапазоны — новый, и недокачка,
+        // начатая при одном, продолжается при другом.
+        hello.set("have", rangesToJson(map.set().ranges()));
+        // Что умеет этот клиент. "backfill" здесь появится, когда он
+        // научится отвечать на serve; объявить раньше — значит позвать
+        // сервер просить у нас то, чего мы не отдадим.
+        json::Value features = json::Value::array();
+        features.push(json::Value::make("ranges"));
+        hello.set("features", std::move(features));
         ws.sendText(hello.dump());
     }
 
@@ -493,6 +538,9 @@ int runGet(const Options &options)
     std::deque<net::WsMessage> deferred;
 
     bool accepted = false;
+    // Понимает ли этот релей диапазоны. Пока не ответил — молчим о них:
+    // неизвестное сообщение для сервера это bad_message, а не «пропущу».
+    bool serverSpeaksRanges = false;
     const int64_t helloDeadline = nowMs() + 20000;
     while (!accepted && nowMs() < helloDeadline && !stopRequested()) {
         if (!ws.pump(200)) {
@@ -518,6 +566,7 @@ int runGet(const Options &options)
             const std::string type = v["type"].toString();
             if (type == "hello_ok") {
                 accepted = true;
+                serverSpeaksRanges = announces(v, "ranges");
             } else if (type == "error") {
                 std::fprintf(stderr, "%s\n", explainError(v["reason"].toString()).c_str());
                 platform::fileClose(fd);
@@ -541,8 +590,24 @@ int runGet(const Options &options)
         if (map.has(i))
             segments[size_t(i)] = Seg::Have;
 
+    // Что нам нужно. Сервер запоминает это и в M2.1 начнёт по нему
+    // выбирать источник; сегодня сообщение ничего не меняет в поведении,
+    // но формат провода фиксируется сейчас — переучивать разъехавшиеся
+    // концы потом дороже, чем договориться заранее.
+    if (serverSpeaksRanges) {
+        const std::vector<ChunkRange> want = map.set().missing();
+        if (!want.empty()) {
+            json::Value req = json::Value::object();
+            req.set("type", json::Value::make("request"));
+            req.set("ranges", rangesToJson(want));
+            req.set("budget_bytes", json::Value::make(int64_t(plan.chunkSize) * 8));
+            ws.sendText(req.dump());
+        }
+    }
+
     uint64_t received = have;
     uint64_t ackedUpTo = map.havePrefix();
+    uint64_t sentHaveCount = map.set().cardinality();
     int64_t lastFlushMs = nowMs();
     int64_t lastAckMs = nowMs();
     const int64_t startedMs = nowMs();
@@ -648,14 +713,34 @@ int runGet(const Options &options)
             lastFlushMs = t;
         }
 
+        // Отчёт серверу о принятом: диапазонами, если он их понимает, и
+        // префиксом, если нет.
+        //
+        // Именно диапазонами, а не обеими формами сразу: ack — это тот же
+        // have, сжатый до одного числа, и слать оба значит говорить одно
+        // и то же дважды. Со второй волной префикс к тому же перестанет
+        // что-либо описывать: у получателя появятся дырки, и по ack он
+        // будет выглядеть стоящим на месте, имея половину тома.
         const uint64_t prefix = map.havePrefix();
-        if (prefix != ackedUpTo && t - lastAckMs > 300) {
-            json::Value ack = json::Value::object();
-            ack.set("type", json::Value::make("ack"));
-            ack.set("upto", json::Value::make(int64_t(prefix)));
-            ws.sendText(ack.dump());
-            ackedUpTo = prefix;
-            lastAckMs = t;
+        const uint64_t haveNow = map.set().cardinality();
+        if (t - lastAckMs > 300) {
+            if (serverSpeaksRanges) {
+                if (haveNow != sentHaveCount) {
+                    json::Value have = json::Value::object();
+                    have.set("type", json::Value::make("have"));
+                    have.set("ranges", rangesToJson(map.set().ranges()));
+                    ws.sendText(have.dump());
+                    sentHaveCount = haveNow;
+                    lastAckMs = t;
+                }
+            } else if (prefix != ackedUpTo) {
+                json::Value ack = json::Value::object();
+                ack.set("type", json::Value::make("ack"));
+                ack.set("upto", json::Value::make(int64_t(prefix)));
+                ws.sendText(ack.dump());
+                ackedUpTo = prefix;
+                lastAckMs = t;
+            }
         }
 
         const double frac = plan.chunkCount ? double(received) / double(plan.chunkCount) : 1.0;

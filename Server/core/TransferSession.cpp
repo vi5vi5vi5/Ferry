@@ -3,6 +3,8 @@
 #include <QDateTime>
 #include <QJsonArray>
 #include <algorithm>
+#include <cmath>
+#include <vector>
 
 #include "config/Log.h"
 #include "core/Chunker.h"
@@ -23,6 +25,71 @@ quint64 readBe64(const char *p)
 // держать раздачу в оперативке незачем — это уже не паром, а хранилище.
 constexpr qint64 kDefaultTtlMs = 24 * 60 * 60 * 1000LL;
 constexpr qint64 kMaxTtlMs = 7 * 24 * 60 * 60 * 1000LL;
+
+// Сколько диапазонов готовы принять в одном сообщении.
+//
+// Потолок нужен, потому что список приходит снаружи: клиент, приславший
+// миллион диапазонов по одному чанку, заставил бы сервер держать их все.
+// Четыре тысячи — это заведомо больше, чем бывает у честного получателя
+// (у него их единицы: живая волна плюс то, что тянется второй), и
+// заведомо меньше, чем нужно, чтобы кому-то навредить.
+constexpr int kMaxRangesPerMessage = 4096;
+
+// Диапазоны из JSON: [[a,b],[c,d]]. Границы ВКЛЮЧИТЕЛЬНЫЕ с обеих сторон
+// (§8), и это единственное место на сервере, где они превращаются в
+// ferry::ChunkRange. Клиент делает то же самое своим json::Value —
+// расходиться им нельзя, поэтому смысл границ живёт в ядре, в ChunkSet, а
+// здесь остаётся только разбор.
+bool parseRanges(const QJsonValue &value, quint64 chunkCount,
+                 std::vector<ferry::ChunkRange> &out)
+{
+    out.clear();
+    if (value.isUndefined() || value.isNull())
+        return true;   // поля нет — это пустой список, а не ошибка
+    if (!value.isArray())
+        return false;
+
+    const QJsonArray arr = value.toArray();
+    if (arr.size() > kMaxRangesPerMessage)
+        return false;
+
+    out.reserve(size_t(arr.size()));
+    for (const QJsonValue &item : arr) {
+        if (!item.isArray())
+            return false;
+        const QJsonArray pair = item.toArray();
+        if (pair.size() != 2)
+            return false;
+        const double from = pair.at(0).toDouble(-1);
+        const double to = pair.at(1).toDouble(-1);
+        // Дробное или отрицательное — это не «почти индекс», это мусор.
+        if (from < 0 || to < 0 || from != std::floor(from) || to != std::floor(to))
+            return false;
+        const ferry::ChunkRange r{uint64_t(from), uint64_t(to)};
+        if (!r.valid() || r.to >= chunkCount)
+            return false;
+        out.push_back(r);
+    }
+    return true;
+}
+
+// Возможности, объявленные клиентом. Неизвестные имена пропускаем молча:
+// так клиент из будущего сможет объявить что-то новое, не поссорившись с
+// сегодняшним сервером.
+quint32 parseFeatures(const QJsonValue &value)
+{
+    quint32 flags = 0;
+    if (!value.isArray())
+        return flags;
+    for (const QJsonValue &item : value.toArray()) {
+        const QString name = item.toString();
+        if (name == QLatin1String("ranges"))
+            flags |= ClientSession::FeatureRanges;
+        else if (name == QLatin1String("backfill"))
+            flags |= ClientSession::FeatureBackfill;
+    }
+    return flags;
+}
 
 } // namespace
 
@@ -153,8 +220,8 @@ void TransferSession::attachSender(ClientSession *sender)
     sender->setTransfer(this);
 }
 
-bool TransferSession::attachReceiver(ClientSession *receiver, quint64 haveUpto, qint64 nowMs,
-                                     QString *errorCode)
+bool TransferSession::attachReceiver(ClientSession *receiver, const QJsonObject &hello,
+                                     qint64 nowMs, QString *errorCode)
 {
     const auto fail = [&](const char *code) {
         if (errorCode)
@@ -171,7 +238,31 @@ bool TransferSession::attachReceiver(ClientSession *receiver, quint64 haveUpto, 
     if (m_receivers.size() >= m_maxConcurrent)
         return fail(ferry::err::kTooManyReceivers);
 
-    haveUpto = std::min(haveUpto, m_chunkCount);
+    // ---- что клиент умеет и что у него уже есть ----
+    receiver->setFeatures(parseFeatures(hello.value(QStringLiteral("features"))));
+    receiver->have().reset(m_chunkCount);
+    receiver->wanted().reset(m_chunkCount);
+
+    std::vector<ferry::ChunkRange> haveRanges;
+    if (!parseRanges(hello.value(QStringLiteral("have")), m_chunkCount, haveRanges))
+        return fail(ferry::err::kBadMessage);
+    receiver->have().applyRanges(haveRanges);
+
+    // have_upto — форма из M1. Принимаем её и от нового клиента тоже:
+    // диапазоны и префикс не противоречат друг другу, а объединяются.
+    // Так недокачка, начатая старым клиентом, продолжается новым без
+    // единого лишнего чанка.
+    const double haveUptoRaw = hello.value(QStringLiteral("have_upto")).toDouble(0);
+    if (haveUptoRaw > 0) {
+        const quint64 upto = std::min(quint64(haveUptoRaw), m_chunkCount);
+        if (upto > 0)
+            receiver->have().setRange({0, uint64_t(upto) - 1});
+    }
+
+    // Курсор живого потока ставится на конец непрерывного НАЧАЛА, а не на
+    // количество принятого: чанк, лежащий за дыркой, живому потоку не
+    // помогает — он поедет второй волной.
+    quint64 haveUpto = std::min<quint64>(receiver->have().prefix(), m_chunkCount);
 
     // Опоздавший. В M1 отдать ему недостающее начало неоткуда: окно — это
     // буфер джиттера на секунды, а backfill от других получателей появится
@@ -272,8 +363,31 @@ void TransferSession::onReceiverAck(ClientSession *receiver, quint64 upto)
 {
     // ack — это «записал на диск», а не «получил в сокет». Курсором он не
     // управляет (курсором управляем мы), но именно по нему отправитель
-    // видит честный прогресс.
+    // видит честный прогресс у клиента, не умеющего диапазонов.
     receiver->setAcked(std::min(upto, m_chunkCount));
+}
+
+bool TransferSession::onReceiverHave(ClientSession *receiver, const QJsonObject &msg)
+{
+    std::vector<ferry::ChunkRange> ranges;
+    if (!parseRanges(msg.value(QStringLiteral("ranges")), m_chunkCount, ranges))
+        return false;
+
+    // Только добавляем. Получатель не может «разыметь» чанк: снятие битов
+    // по его слову означало бы, что чужое сообщение способно заставить
+    // сервер переслать уже доставленное, сколько угодно раз.
+    receiver->have().applyRanges(ranges);
+    return true;
+}
+
+bool TransferSession::onReceiverRequest(ClientSession *receiver, const QJsonObject &msg)
+{
+    std::vector<ferry::ChunkRange> ranges;
+    if (!parseRanges(msg.value(QStringLiteral("ranges")), m_chunkCount, ranges))
+        return false;
+
+    receiver->wanted().applyRanges(ranges);
+    return true;
 }
 
 quint64 TransferSession::slowestCursor() const
@@ -410,13 +524,23 @@ QJsonObject TransferSession::peersJson() const
 {
     QJsonArray arr;
     for (const ClientSession *r : m_receivers) {
+        // Прогресс считается по КОЛИЧЕСТВУ принятого, а не по префиксу,
+        // но только у клиента, который умеет говорить диапазонами. У
+        // клиента M1 карты на сервере нет и быть не может — он шлёт
+        // только ack, — и для него остаётся прежний счёт по префиксу.
+        //
+        // Разница появится вместе со второй волной: получатель, тянущий
+        // начало тома и одновременно хвост, по префиксу выглядел бы
+        // стоящим на нуле, хотя у него уже половина.
+        const bool ranges = r->speaks(ClientSession::FeatureRanges);
+        const quint64 done = ranges ? r->have().cardinality() : r->acked();
+
         QJsonObject o;
         o[QStringLiteral("id")] = int(r->receiverId());
         o[QStringLiteral("name")] = r->name();
-        o[QStringLiteral("progress")] =
-            m_chunkCount ? double(r->acked()) / double(m_chunkCount) : 1.0;
-        o[QStringLiteral("role")] = r->acked() >= m_chunkCount ? QStringLiteral("seed")
-                                                               : QStringLiteral("leech");
+        o[QStringLiteral("progress")] = m_chunkCount ? double(done) / double(m_chunkCount) : 1.0;
+        o[QStringLiteral("role")] =
+            done >= m_chunkCount ? QStringLiteral("seed") : QStringLiteral("leech");
         arr.append(o);
     }
     QJsonObject o;

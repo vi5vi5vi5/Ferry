@@ -4,6 +4,8 @@
 #include <QObject>
 #include <QString>
 
+#include "core/ChunkSet.h"
+
 class QWebSocket;
 class QJsonObject;
 class TransferSession;
@@ -51,10 +53,39 @@ public:
     void setCursor(quint64 c) { m_cursor = c; }
 
     // Сколько чанков получатель подтвердил. Отличается от курсора: курсор —
-    // что мы отдали сокету, ack — что клиент записал на диск. По ack
-    // считается прогресс, который видит отправитель.
+    // что мы отдали сокету, ack — что клиент записал на диск.
     quint64 acked() const { return m_acked; }
     void setAcked(quint64 a) { m_acked = a; }
+
+    // ---- то, что появилось в M2 ----
+
+    // Чем клиент владеет сверх обязательного минимума. Объявляется им
+    // самим в hello, и спрашивать об этом приходится потому, что клиент
+    // может оказаться старее сервера: релей раздаёт свою версию клиента,
+    // но у человека на диске вполне может лежать прошлая.
+    //
+    // Молчание клиента о возможности — это всегда «не умеет». Обратное
+    // (считать, что умеет, раз не сказал обратного) означало бы ждать от
+    // него сообщений, которых он не пошлёт, и вешать на этом чужую
+    // раздачу.
+    enum Feature : quint32 {
+        FeatureRanges = 1u << 0,     // говорит have/request диапазонами
+        FeatureBackfill = 1u << 1,   // умеет отвечать на serve
+    };
+    quint32 features() const { return m_features; }
+    void setFeatures(quint32 f) { m_features = f; }
+    bool speaks(Feature f) const { return (m_features & quint32(f)) != 0; }
+
+    // Карта того, что у получателя есть. В M1 хватало префикса (чанки
+    // приходили по порядку), с двумя волнами — уже нет: у получателя
+    // появляются дырки, и прогресс перестаёт быть одним числом.
+    ferry::ChunkSet &have() { return m_have; }
+    const ferry::ChunkSet &have() const { return m_have; }
+
+    // Что получатель просит. Заполняется сообщением request; планировщик
+    // начнёт по нему выбирать источник в M2.1.
+    ferry::ChunkSet &wanted() { return m_wanted; }
+    const ferry::ChunkSet &wanted() const { return m_wanted; }
 
     void sendJson(const QJsonObject &obj);
     void sendBinary(const QByteArray &data);
@@ -89,4 +120,7 @@ private:
     TransferSession *m_transfer = nullptr;
     quint64 m_cursor = 0;
     quint64 m_acked = 0;
+    quint32 m_features = 0;
+    ferry::ChunkSet m_have;
+    ferry::ChunkSet m_wanted;
 };

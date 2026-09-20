@@ -66,11 +66,12 @@ public:
     // Проверка политики (использования, TTL, потолок одновременных) и
     // подключение. errorCode получает код из §8.
     //
-    // haveUpto — сколько чанков подряд с начала у получателя уже есть
-    // (докачка). Курсор ставится сюда, и повторно эти чанки не уезжают.
-    // Полноценные диапазоны have придут в M2 вместе с backfill; префикса
-    // хватает, пока чанки приходят по порядку.
-    bool attachReceiver(ClientSession *receiver, quint64 haveUpto, qint64 nowMs,
+    // hello разбирается здесь целиком, а не в TransferServer: из него
+    // берутся и карта уже принятого (`have` диапазонами или `have_upto`
+    // префиксом у клиента M1), и объявленные клиентом возможности.
+    // Курсор ставится на конец непрерывного начала, и повторно эти чанки
+    // не уезжают.
+    bool attachReceiver(ClientSession *receiver, const QJsonObject &hello, qint64 nowMs,
                         QString *errorCode);
     void detach(ClientSession *session);
 
@@ -84,6 +85,16 @@ public:
     // полезную нагрузку.
     bool onSenderFrame(const QByteArray &frame, QString *errorCode);
     void onReceiverAck(ClientSession *receiver, quint64 upto);
+
+    // Получатель уточняет, что у него есть и что ему нужно. Оба сообщения
+    // — диапазонами, с включительными границами, как в §8.
+    //
+    // false означает негодный список (перевёрнутый диапазон, выход за
+    // пределы тома, слишком длинный перечень), и это bad_message: такое
+    // не приходит от исправного клиента, а молча проглоченный мусор
+    // разошёлся бы с картиной мира у получателя.
+    bool onReceiverHave(ClientSession *receiver, const QJsonObject &msg);
+    bool onReceiverRequest(ClientSession *receiver, const QJsonObject &msg);
 
     // Сторожевой такт раз в секунду.
     //

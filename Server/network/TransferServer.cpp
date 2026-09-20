@@ -119,6 +119,16 @@ void TransferServer::sendError(ClientSession *session, const char *reason, bool 
         session->close();
 }
 
+QJsonArray TransferServer::serverFeatures()
+{
+    QJsonArray f;
+    f.append(QStringLiteral("ranges"));
+    // "backfill" сюда добавится, когда планировщик научится рассылать
+    // serve. Объявить раньше времени — значит позвать клиента говорить о
+    // том, чего мы ещё не умеем слушать.
+    return f;
+}
+
 void TransferServer::onText(ClientSession *session, const QString &text)
 {
     const QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8());
@@ -135,6 +145,10 @@ void TransferServer::onText(ClientSession *session, const QString &text)
         handleHello(session, msg);
     } else if (type == QLatin1String("ack")) {
         handleAck(session, msg);
+    } else if (type == QLatin1String("have")) {
+        handleHave(session, msg);
+    } else if (type == QLatin1String("request")) {
+        handleRequest(session, msg);
     } else if (type == QLatin1String("bye")) {
         session->close();
     } else if (type == QLatin1String("subscribe_live")) {
@@ -185,6 +199,7 @@ void TransferServer::handleOffer(ClientSession *session, const QJsonObject &msg)
     QJsonObject ok;
     ok[QStringLiteral("type")] = QStringLiteral("offer_ok");
     ok[QStringLiteral("chunks")] = double(transfer->chunkCount());
+    ok[QStringLiteral("features")] = serverFeatures();
     session->sendJson(ok);
 
     qInfo().noquote() << QStringLiteral("раздача принята: %1, %2 чанков")
@@ -239,12 +254,10 @@ void TransferServer::handleHello(ClientSession *session, const QJsonObject &msg)
         name.truncate(64);
     session->setName(name);
 
-    // Докачка: получатель говорит, сколько чанков подряд у него уже есть.
-    const double haveUptoRaw = msg.value(QStringLiteral("have_upto")).toDouble(0);
-    const quint64 haveUpto = haveUptoRaw > 0 ? quint64(haveUptoRaw) : 0;
-
+    // Что у получателя уже есть и что он умеет — разбирает сама раздача:
+    // там же лежит количество чанков, без которого диапазоны не проверить.
     QString errorCode;
-    if (!transfer->attachReceiver(session, haveUpto, QDateTime::currentMSecsSinceEpoch(),
+    if (!transfer->attachReceiver(session, msg, QDateTime::currentMSecsSinceEpoch(),
                                   &errorCode)) {
         sendError(session, errorCode.toLatin1().constData());
         return;
@@ -260,6 +273,7 @@ void TransferServer::handleHello(ClientSession *session, const QJsonObject &msg)
     ok[QStringLiteral("chunks")] = double(transfer->chunkCount());
     ok[QStringLiteral("uses_left")] = transfer->usesLeft();
     ok[QStringLiteral("from_chunk")] = double(session->cursor());
+    ok[QStringLiteral("features")] = serverFeatures();
     session->sendJson(ok);
 
     if (TransferSession *t = session->transfer()) {
@@ -271,6 +285,38 @@ void TransferServer::handleHello(ClientSession *session, const QJsonObject &msg)
                              .arg(Log::keepsIdentifiers() ? QString::fromLatin1(id)
                                                           : QStringLiteral("<id скрыт>"));
 
+    transfer->pump();
+}
+
+void TransferServer::handleHave(ClientSession *session, const QJsonObject &msg)
+{
+    TransferSession *transfer = session->transfer();
+    if (!transfer || session->role() != ClientSession::Role::Receiver) {
+        sendError(session, ferry::err::kBadMessage);
+        return;
+    }
+    if (!transfer->onReceiverHave(session, msg)) {
+        sendError(session, ferry::err::kBadMessage);
+        return;
+    }
+    // Сводку отправителю пересобираем сразу: именно have теперь несёт
+    // прогресс получателя, и ждать секунду до тика значило бы показывать
+    // отправителю вчерашний день.
+    if (transfer->sender())
+        transfer->sender()->sendJson(transfer->peersJson());
+}
+
+void TransferServer::handleRequest(ClientSession *session, const QJsonObject &msg)
+{
+    TransferSession *transfer = session->transfer();
+    if (!transfer || session->role() != ClientSession::Role::Receiver) {
+        sendError(session, ferry::err::kBadMessage);
+        return;
+    }
+    if (!transfer->onReceiverRequest(session, msg)) {
+        sendError(session, ferry::err::kBadMessage);
+        return;
+    }
     transfer->pump();
 }
 
