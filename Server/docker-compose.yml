@@ -41,6 +41,9 @@ services:
         # Собирать ли клиент под Windows. Заглушка вместо настоящей стадии
         # экономит несколько минут первой сборки; см. --skip-windows.
         WINDOWS_STAGE: ${WINDOWS_STAGE:-build-client-windows}
+        # Сколько компиляций разом внутри стадии. Пусто — по усмотрению
+        # ninja. Сами стадии идут по очереди всегда — это зашито в Dockerfile.
+        BUILD_JOBS: ${BUILD_JOBS:-}
     restart: unless-stopped
     volumes:
       # ЕДИНСТВЕННОЕ, что Ferry читает с диска, — ferry.conf. Данных

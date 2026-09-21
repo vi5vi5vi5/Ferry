@@ -22,6 +22,11 @@
 #  ПЕРВОЙ сборки; дальше стадия всё равно берётся из кэша):
 #    ./tools/update.sh --skip-windows
 #
+#  Маленькая машина (два потока, два гигабайта)? Стадии и так идут по
+#  очереди, но внутри стадии ninja на двух ядрах запускает три
+#  компиляции разом. Если сборка падает по памяти — прижать:
+#    ./tools/update.sh --jobs 1
+#
 #  Домен, почта и порты ЗАПОМИНАЮТСЯ в .env рядом с docker-compose.yml:
 #  указали --domain один раз — дальше хватает `./tools/update.sh`.
 # ============================================================
@@ -34,6 +39,7 @@ REPO_ROOT="$(cd "$SERVER_DIR/.." && pwd)"
 cd "$SERVER_DIR"
 
 FORCE=0
+JOBS_RESET=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --force|-f)   FORCE=1; shift ;;
@@ -49,10 +55,18 @@ while [[ $# -gt 0 ]]; do
             fi
             export FERRY_PROXY_NETWORK="$2"; shift 2 ;;
         --standalone) export FERRY_PROXY_NETWORK=""; shift ;;
+        --jobs|-j)
+            case "${2:-}" in
+                ''|*[!0-9]*)
+                    echo "У --jobs нужно число: сколько компиляций разом." >&2
+                    exit 1 ;;
+            esac
+            export BUILD_JOBS="$2"; shift 2 ;;
+        --jobs-auto)     JOBS_RESET=1; shift ;;
         --skip-windows)  export WINDOWS_STAGE="build-client-windows-skip"; shift ;;
         --with-windows)  export WINDOWS_STAGE="build-client-windows"; shift ;;
         -h|--help)
-            sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^#//'
+            sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^#//'
             exit 0 ;;
         *)
             echo "Неизвестный аргумент: $1" >&2
@@ -83,7 +97,23 @@ env_file_set() {
     mv "$tmp" "$ENV_FILE"
 }
 
-for var in DOMAIN LETSENCRYPT_EMAIL HTTP_PORT HTTPS_PORT FERRY_PROXY_NETWORK WINDOWS_STAGE; do
+env_file_unset() {
+    [[ -f "$ENV_FILE" ]] || return 0
+    local tmp="${ENV_FILE}.tmp"
+    grep -v "^$1=" "$ENV_FILE" > "$tmp" || true
+    mv "$tmp" "$ENV_FILE"
+}
+
+# «Верни как было» надо отработать ДО цикла ниже. Иначе пустое значение
+# проскочит мимо ветки «запомнить» и тут же будет перезаполнено старым
+# из .env — то есть флаг не сделает ровно ничего.
+if [[ "$JOBS_RESET" == "1" ]]; then
+    env_file_unset BUILD_JOBS
+    unset BUILD_JOBS
+    echo "Число компиляций разом больше не ограничено."
+fi
+
+for var in DOMAIN LETSENCRYPT_EMAIL HTTP_PORT HTTPS_PORT FERRY_PROXY_NETWORK WINDOWS_STAGE BUILD_JOBS; do
     if [[ -n "${!var:-}" ]]; then
         env_file_set "$var" "${!var}"
     else
@@ -297,9 +327,16 @@ if [[ "${WINDOWS_STAGE:-}" == "build-client-windows-skip" ]]; then
     echo "  Вернуть: ./tools/update.sh --force --with-windows"
 fi
 
+if [[ -n "${BUILD_JOBS:-}" ]]; then
+    echo "Компиляций разом: ${BUILD_JOBS} (запомнено в .env)."
+    echo "  Снять ограничение: ./tools/update.sh --force --jobs-auto"
+fi
+
 echo
 echo "=== 2/3 Пересборка и перезапуск (docker compose) ==="
 echo "Первая сборка занимает несколько минут: Qt-сервер, ядро и два клиента."
+echo "Стадии идут по очереди, а не разом: три компилятора параллельно не"
+echo "выживают на маленькой машине. Из-за этого сборка длиннее, но доходит до конца."
 echo "Повторные — быстрые, тяжёлые стадии берутся из кэша docker."
 # up -d --build сам пересоберёт изменившиеся образы и перезапустит только
 # те контейнеры, которые поменялись. Первая сборка занимает несколько

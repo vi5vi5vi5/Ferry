@@ -11,6 +11,23 @@
 #    build-client-windows  клиент под Windows (кросс-компиляция MinGW-w64)
 #    runtime               slim-образ: сервер, страницы и оба бинаря рядом
 #
+#  ОЧЕРЕДЬ СТАДИЙ. По умолчанию BuildKit запускает независимые стадии
+#  ПАРАЛЛЕЛЬНО — три компилятора разом. На машине с двумя потоками и двумя
+#  гигабайтами это заканчивается OOM-killer'ом посреди сборки. Поэтому
+#  стадии выстроены в цепочку: сервер → клиент Linux → клиент Windows.
+#
+#  Сделано маркером `/stage-done`, который каждая стадия кладёт после
+#  себя, а следующая копирует к себе первой же строкой. Копирование и
+#  создаёт ребро в графе: BuildKit не начнёт следующую, пока предыдущая
+#  не закончится.
+#
+#  Содержимое маркера ПОСТОЯННО («ok»), и это не мелочь. Кэш COPY
+#  считается по содержимому копируемого, а не по тому, пересобиралась ли
+#  стадия-источник. Постоянный маркер значит, что правка в Cli/ не тащит
+#  за собой пересборку OpenSSL под MinGW, которая идёт четверть часа.
+#  Положи сюда что-нибудь меняющееся — например сам бинарь сервера — и
+#  каждое обновление начиналось бы со сборки OpenSSL заново.
+#
 #  Зачем клиенты собираются внутри образа сервера. Затем, что релей раздаёт
 #  собственный клиент: `curl -fsSL https://<релей>/install.sh | sh`. Это
 #  делает установку такой же простой, как в MeetUp (где клиент — браузер),
@@ -47,9 +64,17 @@ COPY . .
 ARG GIT_COMMIT=unknown
 ARG GIT_MODIFIED=0
 
+# Сколько компиляций разом. Пусто — сколько решит ninja, а он на двух
+# ядрах берёт три задачи. На маленькой машине задаётся снаружи:
+#   ./tools/update.sh --jobs 1
+ARG BUILD_JOBS=
+
 RUN cmake -S Server -B build-server -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DFERRY_COMMIT="${GIT_COMMIT}" -DFERRY_MODIFIED="${GIT_MODIFIED}" \
- && cmake --build build-server
+ && cmake --build build-server ${BUILD_JOBS:+-j ${BUILD_JOBS}}
+
+# Конец стадии — см. «ОЧЕРЕДЬ СТАДИЙ» в шапке.
+RUN echo ok > /stage-done
 
 # ---------- 2. Клиент под Linux ----------
 # Ubuntu 22.04, а не bookworm, и это не случайность.
@@ -71,6 +96,9 @@ FROM ubuntu:22.04 AS build-client
 # про часовой пояс и ждёт ответа до конца времён.
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Ждём, пока закончится серверная стадия.
+COPY --from=build-server /stage-done /stage-order/server
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         build-essential \
@@ -88,9 +116,11 @@ ARG GIT_COMMIT=unknown
 # glibc. Самотесты ядра собираются заодно и тут же прогоняются — если
 # BLAKE3 или AEAD разошлись с эталоном, образ не соберётся, и это
 # правильное место, чтобы об этом узнать.
+ARG BUILD_JOBS=
+
 RUN cmake -S . -B build-client -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DFERRY_STATIC_OPENSSL=ON -DFERRY_COMMIT="${GIT_COMMIT}" \
- && cmake --build build-client \
+ && cmake --build build-client ${BUILD_JOBS:+-j ${BUILD_JOBS}} \
  && ./build-client/tests/ferry-core-test
 
 # Раскладываем то, что будет раздаваться: бинарь и контрольная сумма.
@@ -98,6 +128,8 @@ RUN mkdir -p /out/dl \
  && cp build-client/Cli/ferry "/out/dl/ferry-linux-$(uname -m)" \
  && cd /out/dl && sha256sum ferry-linux-* > SHA256SUMS \
  && cat SHA256SUMS
+
+RUN echo ok > /stage-done
 
 # ---------- 3. Клиент под Windows ----------
 # Кросс-компиляция MinGW-w64 прямо здесь, а не на отдельной машине с
@@ -110,6 +142,11 @@ RUN mkdir -p /out/dl \
 # Если ferry.exe не нужен совсем, есть ./tools/update.sh --skip-windows:
 # тогда BuildKit эту стадию даже не запустит.
 FROM debian:bookworm AS build-client-windows
+
+# Ждём линуксового клиента. Ворота стоят ДО apt и сборки OpenSSL,
+# а не перед cmake: иначе самая тяжёлая часть стадии всё равно шла бы
+# вперегонки с остальными.
+COPY --from=build-client /stage-done /stage-order/client
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -167,13 +204,19 @@ COPY . .
 
 ARG GIT_COMMIT=unknown
 
+# BUILD_JOBS объявлен здесь, а не выше, и это нарочно: объяви его до
+# сборки OpenSSL — и смена --jobs уронила бы её кэш на четверть часа.
+# OpenSSL остаётся на nproc сознательно: это простой С, он не ест память
+# так, как шаблоны C++, и теперь он в любом случае идёт один, без соседей.
+ARG BUILD_JOBS=
+
 RUN cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake \
         -DFERRY_WIN_DEPS=/opt/openssl-win \
         -DFERRY_STATIC_OPENSSL=ON \
         -DFERRY_BUILD_TESTS=OFF \
         -DFERRY_COMMIT="${GIT_COMMIT}" \
- && cmake --build build-win
+ && cmake --build build-win ${BUILD_JOBS:+-j ${BUILD_JOBS}}
 
 RUN mkdir -p /out/dl \
  && cp build-win/Cli/ferry.exe /out/dl/ferry-windows-x86_64.exe \
