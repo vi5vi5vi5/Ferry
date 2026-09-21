@@ -20,6 +20,9 @@ target_include_directories(ferry-qrcodegen PUBLIC
 add_executable(ferry
     main.cpp
     ChunkPump.h   ChunkPump.cpp
+    Tree.h        Tree.cpp
+    VolumeFile.h  VolumeFile.cpp
+    Uninstall.h   Uninstall.cpp
     Options.h     Options.cpp
     Relay.h       Relay.cpp
     Sender.h      Sender.cpp

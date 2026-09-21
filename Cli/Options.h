@@ -14,7 +14,7 @@ namespace ferry::cli {
 
 struct Options
 {
-    enum class Command { None, Send, Get, Version, Help, Config };
+    enum class Command { None, Send, Get, Version, Help, Config, Uninstall };
 
     Command command = Command::None;
 

@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -242,12 +243,83 @@ bool fileSync(File f)
 
 bool fileStat(const std::string &path, FileInfo &out)
 {
+    // lstat, а не stat: нам важно увидеть именно симлинк, а не то, куда
+    // он ведёт. Обход каталога по симлинкам — это либо цикл, либо
+    // полдиска в томе, и ни того ни другого никто не просил.
     struct stat st{};
-    if (::stat(path.c_str(), &st) != 0)
+    if (::lstat(path.c_str(), &st) != 0)
         return false;
+    out.isSymlink = S_ISLNK(st.st_mode);
+    if (out.isSymlink) {
+        // Размер и вид берём у цели — вызывающему полезно знать, на
+        // что указывает ссылка, даже если возить её мы не будем.
+        struct stat target{};
+        if (::stat(path.c_str(), &target) == 0) {
+            out.size = uint64_t(target.st_size);
+            out.isDirectory = S_ISDIR(target.st_mode);
+            out.isRegular = S_ISREG(target.st_mode);
+            out.mtime = int64_t(target.st_mtime);
+            return true;
+        }
+    }
     out.size = uint64_t(st.st_size);
     out.isDirectory = S_ISDIR(st.st_mode);
+    out.isRegular = S_ISREG(st.st_mode);
+    out.mtime = int64_t(st.st_mtime);
     return true;
+}
+
+bool listDirectory(const std::string &path, std::vector<DirEntry> &out)
+{
+    out.clear();
+    DIR *dir = ::opendir(path.c_str());
+    if (!dir)
+        return false;
+
+    while (const dirent *de = ::readdir(dir)) {
+        const std::string name = de->d_name;
+        if (name == "." || name == "..")
+            continue;
+
+        DirEntry e;
+        e.name = name;
+        // d_type не везде заполнен (XFS и сетевые ФС отдают DT_UNKNOWN),
+        // поэтому всё равно спрашиваем систему.
+        FileInfo info;
+        if (fileStat(path + "/" + name, info)) {
+            e.isDirectory = info.isDirectory;
+            e.isSymlink = info.isSymlink;
+            e.isOther = !info.isDirectory && !info.isSymlink && !info.isRegular;
+            e.size = info.size;
+            e.mtime = info.mtime;
+        } else {
+            // Запись видна, но система не говорит, что это. Молча счесть её пустым
+            // файлом значило бы положить в том правдоподобную пустоту.
+            e.isOther = true;
+        }
+        out.push_back(std::move(e));
+    }
+    ::closedir(dir);
+    return true;
+}
+
+bool removeTree(const std::string &path)
+{
+    FileInfo info;
+    if (!fileStat(path, info))
+        return false;
+
+    // Симлинк удаляется как ссылка, даже если ведёт на каталог.
+    if (!info.isDirectory || info.isSymlink)
+        return ::unlink(path.c_str()) == 0;
+
+    std::vector<DirEntry> entries;
+    if (!listDirectory(path, entries))
+        return false;
+    bool ok = true;
+    for (const DirEntry &e : entries)
+        ok = removeTree(path + "/" + e.name) && ok;
+    return ::rmdir(path.c_str()) == 0 && ok;
 }
 
 bool fileExists(const std::string &path)
@@ -318,6 +390,42 @@ std::string configFilePath()
         if (*home)
             return std::string(home) + "/.config/ferry/config";
     return {};
+}
+
+std::string configDirPath()
+{
+    const std::string file = configFilePath();
+    const size_t cut = file.rfind('/');
+    return cut == std::string::npos ? std::string() : file.substr(0, cut);
+}
+
+std::string executablePath()
+{
+    char buf[4096];
+    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        return std::string(buf);
+    }
+    return {};
+}
+
+bool removeFromUserPath(const std::string &)
+{
+    // install.sh в PATH не лезет — он только советует строку для
+    // ~/.profile. Значит и убирать нам нечего: правка чужого профиля без
+    // спроса хуже, чем оставленная строка, о которой мы честно скажем.
+    return false;
+}
+
+bool removeSelf(const std::string &exePath, bool *deferred)
+{
+    // На POSIX это просто работает: имя из каталога исчезает сразу, а
+    // инод живёт, пока процесс не закончится. Никаких отложенных
+    // поручений и никаких следов.
+    if (deferred)
+        *deferred = false;
+    return ::unlink(exePath.c_str()) == 0;
 }
 
 } // namespace ferry::platform

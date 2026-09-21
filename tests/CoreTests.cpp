@@ -21,6 +21,7 @@
 #include "core/Json.h"
 #include "core/Link.h"
 #include "core/Manifest.h"
+#include "core/VolumeLayout.h"
 
 namespace {
 
@@ -258,6 +259,77 @@ void testChunkSet()
     ChunkSet none(0);
     check(none.empty() && !none.full() && none.ranges().empty() && none.prefix() == 0,
           "множество на пустом томе");
+}
+
+void testVolumeLayout()
+{
+    using ferry::Manifest;
+    using ferry::ManifestEntry;
+    using ferry::VolumeLayout;
+
+    section("Раскладка тома");
+
+    // Одиночный файл — это один файл во весь том. Так обе ветки
+    // клиента ходят одной дорогой.
+    Manifest one;
+    one.kind = "file";
+    one.name = "dump.sql";
+    one.total = 1000;
+    VolumeLayout flat;
+    flat.build(one);
+    check(flat.files().size() == 1 && flat.total() == 1000, "одиночный файл — один кусок");
+
+    Manifest tree;
+    tree.kind = "tree";
+    tree.name = "project";
+    tree.entries.push_back({"a.txt", 100, 0, false});
+    tree.entries.push_back({"empty/", 0, 0, true});
+    tree.entries.push_back({"src/main.cpp", 250, 0, false});
+    tree.entries.push_back({"zero.bin", 0, 0, false});
+    tree.entries.push_back({"z.dat", 50, 0, false});
+    tree.total = 400;
+
+    VolumeLayout layout;
+    layout.build(tree);
+    check(layout.total() == 400, "том — сумма размеров");
+    check(layout.files().size() == 3, "пустые файлы и каталоги байт не несут");
+    check(layout.files()[0].start == 0 && layout.files()[1].start == 100
+              && layout.files()[2].start == 350,
+          "смещения идут подряд, без выравнивания");
+
+    // Чанк целиком внутри одного файла.
+    auto inside = layout.slice(10, 20);
+    check(inside.size() == 1 && inside[0].file == 0 && inside[0].offset == 10
+              && inside[0].length == 20,
+          "кусок внутри одного файла");
+
+    // И чанк через границу — ради этого всё и затевалось.
+    auto across = layout.slice(90, 30);
+    check(across.size() == 2, "чанк через границу распадается на два куска");
+    check(across[0].file == 0 && across[0].offset == 90 && across[0].length == 10,
+          "первый кусок — хвост предыдущего файла");
+    check(across[1].file == 1 && across[1].offset == 0 && across[1].length == 20,
+          "второй — начало следующего");
+
+    // Через три файла сразу.
+    auto whole = layout.slice(0, 400);
+    check(whole.size() == 3, "весь том — три куска");
+    uint64_t sum = 0;
+    for (const auto &p : whole)
+        sum += p.length;
+    check(sum == 400, "сумма кусков равна запрошенному");
+
+    // За край тома — пустота, а не обрезок. Длину последнего
+    // чанка считает ChunkPlan, и тихо подправлять его здесь значило
+    // бы скрыть расхождение двух расчётов.
+    check(layout.slice(390, 20).empty(), "запрос за край тома отвергнут");
+    check(layout.slice(400, 1).empty(), "запрос с конца тома пуст");
+    check(layout.slice(0, 0).empty(), "нулевая длина — пусто");
+
+    // Последний байт тома.
+    auto tail = layout.slice(399, 1);
+    check(tail.size() == 1 && tail[0].file == 2 && tail[0].offset == 49,
+          "последний байт находится в последнем файле");
 }
 
 void testHashList()
@@ -562,6 +634,7 @@ int main()
     testBase64Url();
     testChunker();
     testChunkSet();
+    testVolumeLayout();
     testHashList();
     testCrypto();
     testJson();

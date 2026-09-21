@@ -7,10 +7,10 @@
 
 namespace ferry::cli {
 
-void ChunkPump::init(platform::File fd, const ChunkPlan &plan, const Key32 &dataKey,
+void ChunkPump::init(VolumeFile &volume, const ChunkPlan &plan, const Key32 &dataKey,
                      const uint8_t noncePrefix[kNoncePrefixSize])
 {
-    m_fd = fd;
+    m_volume = &volume;
     m_plan = plan;
     m_key = dataKey;
     std::memcpy(m_noncePrefix, noncePrefix, kNoncePrefixSize);
@@ -27,9 +27,11 @@ bool ChunkPump::send(net::WebSocketClient &ws, uint64_t index)
     }
 
     const uint32_t len = m_plan.sizeOf(index);
-    const int64_t got = platform::fileReadAt(m_fd, m_plain.data(), len, m_plan.offsetOf(index));
+    const int64_t got = m_volume->readAt(m_plain.data(), len, m_plan.offsetOf(index));
     if (got != int64_t(len)) {
-        m_error = "файл перестал читаться — его изменили или удалили во время раздачи";
+        m_error = m_volume->error().empty()
+                      ? std::string("файл перестал читаться — его изменили или удалили во время раздачи")
+                      : m_volume->error();
         return false;
     }
 

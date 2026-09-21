@@ -23,6 +23,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cwchar>
+#include <cwctype>
 
 namespace ferry::platform {
 namespace {
@@ -452,6 +454,47 @@ bool fileSync(File f)
     return ::FlushFileBuffers(HANDLE(f)) != 0;
 }
 
+// FILETIME — это сотни наносекунд с 1601 года. Переводим в unix-секунды:
+// манифест хранит время в одном виде на всех системах.
+int64_t unixFromFileTime(const FILETIME &ft)
+{
+    const uint64_t ticks = (uint64_t(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    if (ticks == 0)
+        return 0;
+    return int64_t(ticks / 10000000ull) - 11644473600ll;
+}
+
+// Точка переразбора на Windows — это не обязательно ссылка. Файл OneDrive,
+// который ещё не скачан, — тоже точка переразбора, и таких у людей на рабочем
+// столе может быть весь каталог. Считать их ссылками и молча не взять в том —
+// худшее из возможного: человек отправит папку и получит пустоту. Читаем их
+// как обычные файлы: первое чтение потянет содержимое с облака — ровно так
+// же, как при обычном копировании в проводнике.
+//
+// tag — метка из WIN32_FIND_DATAW::dwReserved0; 0 означает «не знаем».
+#ifndef FILE_ATTRIBUTE_RECALL_ON_OPEN
+#define FILE_ATTRIBUTE_RECALL_ON_OPEN 0x00040000
+#endif
+#ifndef FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+#define FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS 0x00400000
+#endif
+#ifndef IO_REPARSE_TAG_MOUNT_POINT
+#define IO_REPARSE_TAG_MOUNT_POINT 0xA0000003
+#endif
+#ifndef IO_REPARSE_TAG_SYMLINK
+#define IO_REPARSE_TAG_SYMLINK 0xA000000C
+#endif
+bool reparseIsLink(DWORD attrs, DWORD tag)
+{
+    if ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0)
+        return false;
+    if (attrs & (FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS))
+        return false;   // облачный файл, содержимое подтянется при чтении
+    if (tag != 0)
+        return tag == IO_REPARSE_TAG_SYMLINK || tag == IO_REPARSE_TAG_MOUNT_POINT;
+    return true;
+}
+
 bool fileStat(const std::string &path, FileInfo &out)
 {
     WIN32_FILE_ATTRIBUTE_DATA data{};
@@ -459,7 +502,67 @@ bool fileStat(const std::string &path, FileInfo &out)
         return false;
     out.size = (uint64_t(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
     out.isDirectory = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    out.isSymlink = reparseIsLink(data.dwFileAttributes, 0);
+    out.isRegular = !out.isDirectory && !out.isSymlink;
+    out.mtime = unixFromFileTime(data.ftLastWriteTime);
     return true;
+}
+
+bool listDirectory(const std::string &path, std::vector<DirEntry> &out)
+{
+    out.clear();
+    const std::wstring pattern = toWidePath(path) + L"\\*";
+
+    WIN32_FIND_DATAW fd{};
+    const HANDLE h = ::FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &fd,
+                                        FindExSearchNameMatch, nullptr, 0);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+
+    do {
+        const std::wstring wname = fd.cFileName;
+        if (wname == L"." || wname == L"..")
+            continue;
+        DirEntry e;
+        e.name = toUtf8(wname);
+        e.isDirectory = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        e.isSymlink = reparseIsLink(fd.dwFileAttributes, fd.dwReserved0);
+        e.size = (uint64_t(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+        e.mtime = unixFromFileTime(fd.ftLastWriteTime);
+        out.push_back(std::move(e));
+    } while (::FindNextFileW(h, &fd));
+
+    ::FindClose(h);
+    return true;
+}
+
+bool removeTree(const std::string &path)
+{
+    FileInfo info;
+    if (!fileStat(path, info))
+        return false;
+
+    // Точку переразбора сносим как есть, внутрь не заходим: иначе
+    // уборка одного каталога могла бы унести совсем другой.
+    if (info.isDirectory && !info.isSymlink) {
+        std::vector<DirEntry> entries;
+        if (!listDirectory(path, entries))
+            return false;
+        bool ok = true;
+        for (const DirEntry &e : entries)
+            ok = removeTree(path + "\\" + e.name) && ok;
+        return ::RemoveDirectoryW(toWidePath(path).c_str()) != 0 && ok;
+    }
+    if (info.isDirectory)
+        return ::RemoveDirectoryW(toWidePath(path).c_str()) != 0;
+
+    // С файла снимаем атрибут «только чтение»: иначе DeleteFile
+    // откажет, и удаление встанет на пустом месте.
+    const std::wstring w = toWidePath(path);
+    const DWORD attrs = ::GetFileAttributesW(w.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
+        ::SetFileAttributesW(w.c_str(), attrs & ~DWORD(FILE_ATTRIBUTE_READONLY));
+    return ::DeleteFileW(w.c_str()) != 0;
 }
 
 bool fileExists(const std::string &path)
@@ -552,6 +655,152 @@ std::string configFilePath()
         return toUtf8(std::wstring(buffer, len)) + "\\.ferry\\config";
 
     return {};
+}
+
+std::string configDirPath()
+{
+    const std::string file = configFilePath();
+    size_t cut = std::string::npos;
+    for (size_t i = 0; i < file.size(); ++i) {
+        if (file[i] == '/' || file[i] == '\\')
+            cut = i;
+    }
+    return cut == std::string::npos ? std::string() : file.substr(0, cut);
+}
+
+std::string executablePath()
+{
+    std::wstring buf(MAX_PATH * 4, L'\0');
+    const DWORD n = ::GetModuleFileNameW(nullptr, buf.data(), DWORD(buf.size()));
+    if (n == 0 || n >= buf.size())
+        return {};
+    buf.resize(n);
+    return toUtf8(buf);
+}
+
+bool removeFromUserPath(const std::string &dir)
+{
+    // PATH пользователя живёт в HKCU\\Environment. install.ps1 дописывает
+    // туда свой каталог — значит убрать его наша обязанность, иначе
+    // после деинсталляции осталась бы запись на несуществующий путь.
+    HKEY key = nullptr;
+    if (::RegOpenKeyExW(HKEY_CURRENT_USER, L"Environment", 0, KEY_READ | KEY_WRITE, &key)
+        != ERROR_SUCCESS) {
+        return false;
+    }
+
+    DWORD type = 0;
+    DWORD bytes = 0;
+    if (::RegQueryValueExW(key, L"Path", nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS
+        || bytes == 0) {
+        ::RegCloseKey(key);
+        return false;
+    }
+    std::wstring value(bytes / sizeof(wchar_t) + 1, L'\0');
+    if (::RegQueryValueExW(key, L"Path", nullptr, &type,
+                           reinterpret_cast<LPBYTE>(value.data()), &bytes)
+        != ERROR_SUCCESS) {
+        ::RegCloseKey(key);
+        return false;
+    }
+    value.resize(::wcslen(value.c_str()));
+
+    // Разбираем по точке с запятой и собираем обратно без нашего.
+    // Сравнение без учёта регистра и без хвостового слэша: в PATH путь
+    // мог оказаться записан иначе, чем мы его сейчас видим.
+    const std::wstring needle = toWidePath(dir);
+    const auto norm = [](std::wstring t) {
+        while (!t.empty() && (t.back() == L'\\' || t.back() == L'/'))
+            t.pop_back();
+        for (wchar_t &c : t)
+            c = wchar_t(::towlower(c));
+        return t;
+    };
+    const std::wstring want = norm(needle);
+
+    std::wstring rebuilt;
+    bool removed = false;
+    size_t start = 0;
+    while (start <= value.size()) {
+        size_t end = value.find(L';', start);
+        if (end == std::wstring::npos)
+            end = value.size();
+        std::wstring part = value.substr(start, end - start);
+        if (!part.empty() && norm(part) == want) {
+            removed = true;
+        } else if (!part.empty()) {
+            if (!rebuilt.empty())
+                rebuilt += L';';
+            rebuilt += part;
+        }
+        start = end + 1;
+    }
+
+    if (removed) {
+        ::RegSetValueExW(key, L"Path", 0, REG_EXPAND_SZ,
+                         reinterpret_cast<const BYTE *>(rebuilt.c_str()),
+                         DWORD((rebuilt.size() + 1) * sizeof(wchar_t)));
+        // Без этого уже открытые окна будут видеть старый PATH до
+        // перезахода в систему.
+        ::SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0,
+                              reinterpret_cast<LPARAM>(L"Environment"), SMTO_ABORTIFHUNG, 3000,
+                              nullptr);
+    }
+    ::RegCloseKey(key);
+    return removed;
+}
+
+// Аргумент для cmd.exe в кавычках. Путь может содержать пробелы, а
+// пропущенные кавычки превратили бы «Program Files» в два аргумента и
+// удалили бы не то.
+std::wstring quoteArg(const std::wstring &text)
+{
+    return L"\"" + text + L"\"";
+}
+
+bool removeSelf(const std::string &exePath, bool *deferred)
+{
+    // Windows держит образ запущенного процесса и удалить его не даст.
+    // Переименовать, впрочем, даёт — этим и пользуемся: сначала
+    // убираем файл с его имени (с этого мгновения `ferry` в PATH уже
+    // нет), а потом оставляем поручение добить остаток после
+    // нашего выхода.
+    if (deferred)
+        *deferred = true;
+
+    const std::wstring w = toWidePath(exePath);
+    std::wstring tmp = w + L".uninstall";
+    ::DeleteFileW(tmp.c_str());
+    if (!::MoveFileExW(w.c_str(), tmp.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        // Переименовать не вышло — будем удалять по исходному имени.
+        tmp = w;
+    }
+
+    // Поручение: подождать, пока мы закончим, и снести файл вместе с
+    // каталогом, если тот опустеет. rmdir без /s — нарочно: если
+    // человек положил туда своё, это его собственность.
+    std::wstring dir = w;
+    while (!dir.empty() && dir.back() != L'\\' && dir.back() != L'/')
+        dir.pop_back();
+    if (!dir.empty())
+        dir.pop_back();
+
+    std::wstring cmd = L"/c timeout /t 2 /nobreak >nul & del /f /q " + quoteArg(tmp);
+    if (!dir.empty())
+        cmd += L" & rmdir " + quoteArg(dir);
+
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = L"open";
+    info.lpFile = L"cmd.exe";
+    info.lpParameters = cmd.c_str();
+    info.nShow = SW_HIDE;
+    if (!::ShellExecuteExW(&info))
+        return false;
+    if (info.hProcess)
+        ::CloseHandle(info.hProcess);
+    return true;
 }
 
 } // namespace ferry::platform

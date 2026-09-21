@@ -8,6 +8,8 @@
 #include <vector>
 
 #include "Cli/ChunkPump.h"
+#include "Cli/Tree.h"
+#include "Cli/VolumeFile.h"
 #include "Cli/Signals.h"
 #include "Cli/net/WebSocketClient.h"
 #include "Cli/platform/Platform.h"
@@ -23,6 +25,7 @@
 #include "core/Link.h"
 #include "core/Manifest.h"
 #include "core/Protocol.h"
+#include "core/VolumeLayout.h"
 
 namespace ferry::cli {
 namespace {
@@ -102,49 +105,96 @@ int runSend(const Options &options, const Relay &relay)
 {
     using namespace ferry::ui;
 
-    // ---- 1. Открываем файл ----
+    // ---- 1. Что отдаём: файл или каталог ----
     platform::FileInfo info;
     if (!platform::fileStat(options.path, info)) {
-        std::fprintf(stderr, "Не нашёл файл: %s\n", options.path.c_str());
+        std::fprintf(stderr, "Не нашёл: %s\n", options.path.c_str());
         return 1;
     }
+
+    Manifest manifest;
+    TreeScan scan;
     if (info.isDirectory) {
-        std::fprintf(stderr,
-                     "%s — это папка. Папки Ferry научится возить в следующей версии;\n"
-                     "пока упакуйте её, например: tar -C %s -cf - . | zstd -o папка.tar.zst\n",
-                     options.path.c_str(), options.path.c_str());
-        return 1;
+        std::string err;
+        if (!scanTree(options.path, scan, &err)) {
+            std::fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        manifest = scan.manifest;
+    } else {
+        manifest.kind = "file";
+        manifest.name = safeFileName(baseName(options.path));
+        manifest.total = info.size;
+        if (manifest.name.empty()) {
+            std::fprintf(stderr, "Из имени файла не получилось ничего пригодного.\n");
+            return 1;
+        }
     }
 
-    const platform::File fd = platform::fileOpenRead(options.path);
-    if (fd == platform::kInvalidFile) {
-        std::fprintf(stderr, "Не смог открыть %s\n", options.path.c_str());
-        return 1;
-    }
-
-    const uint64_t total = info.size;
+    const uint64_t total = manifest.total;
     const ChunkPlan plan = planFor(total);
     if (!plan.valid()) {
-        std::fprintf(stderr, "Не понял размер файла.\n");
-        platform::fileClose(fd);
+        std::fprintf(stderr, "Не понял размер тома.\n");
+        return 1;
+    }
+    if (total == 0) {
+        std::fprintf(stderr, "Том пустой — возить нечего.\n");
         return 1;
     }
 
-    const std::string name = safeFileName(baseName(options.path));
-    if (name.empty()) {
-        std::fprintf(stderr, "Из имени файла не получилось ничего пригодного.\n");
-        platform::fileClose(fd);
+    // Раскладка тома: какой байт какому файлу принадлежит. Для одиночного
+    // файла получается один файл во весь том — дальше обе ветки ходят
+    // одной дорогой, и ни отправитель, ни получатель больше не знают,
+    // сколько там файлов.
+    VolumeLayout layout;
+    layout.build(manifest);
+
+    VolumeFile volume;
+    const bool opened = info.isDirectory
+                            ? volume.openTree(options.path, layout, false)
+                            : volume.openSingle(options.path, false, total);
+    if (!opened) {
+        std::fprintf(stderr, "%s\n", volume.error().c_str());
         return 1;
     }
+
+    const std::string name = manifest.name;
 
     const int cells = std::min(width(), 78);
     std::printf("%s%s%s\n", dim(), ruleTop("том", cells).c_str(), reset());
     std::printf("%s│%s %s\n", dim(), reset(),
                 field("имя", std::string(accent()) + name + reset()).c_str());
+    if (info.isDirectory) {
+        std::printf("%s│%s %s\n", dim(), reset(),
+                    field("состав",
+                          countOf(scan.fileCount, "файл", "файла", "файлов")
+                              + (scan.dirCount
+                                     ? ", " + countOf(scan.dirCount, "пустая папка",
+                                                      "пустые папки", "пустых папок")
+                                     : std::string())).c_str());
+    }
     std::printf("%s│%s %s\n", dim(), reset(), field("размер", bytes(total)).c_str());
     std::printf("%s│%s %s\n", dim(), reset(),
                 field("чанки", count(plan.chunkCount) + " по " + bytes(plan.chunkSize)).c_str());
     std::printf("%s%s%s\n", dim(), ruleBottom(cells).c_str(), reset());
+
+
+    // Пропущенное говорим вслух и до ссылки. Человек ещё может отменить
+    // отправку и решить по-другому; узнать об этом от получателя, что
+    // «чего-то не хватает», сильно хуже.
+    if (!scan.skipped.empty()) {
+        std::printf("%s│%s %s\n", warn(), reset(),
+                    field("пропущено",
+                          countOf(scan.skipped.size(), "запись", "записи", "записей")
+                              + " — их в томе не будет").c_str());
+        const size_t show = std::min<size_t>(scan.skipped.size(), 8);
+        for (size_t i = 0; i < show; ++i)
+            std::printf("%s│%s   %s\n", warn(), reset(), scan.skipped[i].c_str());
+        if (scan.skipped.size() > show)
+            std::printf("%s│%s   …и ещё %s\n", warn(), reset(),
+                        count(scan.skipped.size() - show).c_str());
+        std::printf("\n");
+    }
 
     // ---- 2. Хеши ----
     // Полный проход по файлу до начала раздачи. На пяти гигабайтах это
@@ -159,11 +209,12 @@ int runSend(const Options &options, const Relay &relay)
         const int64_t startedMs = nowMs();
         for (uint64_t i = 0; i < plan.chunkCount; ++i) {
             const uint32_t len = plan.sizeOf(i);
-            const int64_t got = platform::fileReadAt(fd, buffer.data(), len, plan.offsetOf(i));
+            const int64_t got = volume.readAt(buffer.data(), len, plan.offsetOf(i));
             if (got != int64_t(len)) {
                 panel.finish();
-                std::fprintf(stderr, "\nФайл читается не целиком — он изменился прямо сейчас?\n");
-                platform::fileClose(fd);
+                std::fprintf(stderr, "\n%s\n", volume.error().empty()
+                                         ? "Файл читается не целиком — его изменили прямо сейчас?"
+                                         : volume.error().c_str());
                 return 1;
             }
             hashes.append(blake3(buffer.data(), size_t(len)));
@@ -176,13 +227,13 @@ int runSend(const Options &options, const Relay &relay)
             }
             if (stopRequested()) {
                 panel.finish();
-                platform::fileClose(fd);
                 return 130;
             }
         }
         panel.finish();
-        std::printf("%sхеши готовы за %s — BLAKE3, %s хешей%s\n", dim(),
-                    duration(nowMs() - startedMs).c_str(), count(hashes.size()).c_str(), reset());
+        std::printf("%sхеши готовы за %s — BLAKE3, %s%s\n", dim(),
+                    duration(nowMs() - startedMs).c_str(),
+                    countOf(hashes.size(), "хеш", "хеша", "хешей").c_str(), reset());
     }
 
     // ---- 3. Ключи и метаданные ----
@@ -191,7 +242,6 @@ int runSend(const Options &options, const Relay &relay)
     if (!ok) {
         std::fprintf(stderr, "Системный генератор случайных чисел недоступен — "
                              "продолжать нельзя.\n");
-        platform::fileClose(fd);
         return 1;
     }
     const TransferKeys keys = TransferKeys::derive(master);
@@ -199,14 +249,11 @@ int runSend(const Options &options, const Relay &relay)
     Bytes noncePrefix;
     if (!randomBytes(noncePrefix, kNoncePrefixSize)) {
         std::fprintf(stderr, "Системный генератор случайных чисел недоступен.\n");
-        platform::fileClose(fd);
         return 1;
     }
 
-    Manifest manifest;
-    manifest.kind = "file";
-    manifest.name = name;
-    manifest.total = total;
+    // Манифест уже собран выше — здесь остаётся вписать корневой хеш,
+    // который стал известен только после подсчёта.
     manifest.root = hashes.root();
     const std::string manifestJson = manifest.toJson();
 
@@ -218,7 +265,6 @@ int runSend(const Options &options, const Relay &relay)
         || !sealChunk(keys.meta, noncePrefix.data(), kMetaLabelHashList, plan.chunkCount,
                       rawHashes.data(), rawHashes.size(), encHashes)) {
         std::fprintf(stderr, "Не удалось зашифровать метаданные.\n");
-        platform::fileClose(fd);
         return 1;
     }
 
@@ -227,7 +273,6 @@ int runSend(const Options &options, const Relay &relay)
     std::string err;
     if (!apiCreateTransfer(relay, created, &err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
-        platform::fileClose(fd);
         return 1;
     }
 
@@ -260,7 +305,6 @@ int runSend(const Options &options, const Relay &relay)
     if (!ws.connectTo(relay.host, relay.port, relay.tls, relay.insecure, std::string(kWsPath),
                       20000, &err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
-        platform::fileClose(fd);
         return 1;
     }
 
@@ -352,7 +396,6 @@ int runSend(const Options &options, const Relay &relay)
                 std::fprintf(stderr, "%s\n", explainError(reason).c_str());
             else
                 std::fprintf(stderr, "Соединение оборвалось: %s\n", ws.error().c_str());
-            platform::fileClose(fd);
             return 1;
         }
         net::WsMessage msg;
@@ -367,14 +410,12 @@ int runSend(const Options &options, const Relay &relay)
                 rememberNeed(v);
             } else if (type == "error") {
                 std::fprintf(stderr, "%s\n", explainError(v["reason"].toString()).c_str());
-                platform::fileClose(fd);
                 return 1;
             }
         }
     }
     if (!accepted) {
         std::fprintf(stderr, "Сервер не подтвердил раздачу.\n");
-        platform::fileClose(fd);
         return 1;
     }
 
@@ -410,7 +451,7 @@ int runSend(const Options &options, const Relay &relay)
 
     // ---- 7. Качаем ----
     ChunkPump pump;
-    pump.init(fd, plan, keys.data, noncePrefix.data());
+    pump.init(volume, plan, keys.data, noncePrefix.data());
     ChunkSet sent(plan.chunkCount);
     uint64_t sentBytes = 0;
     uint64_t sentDistinctBytes = 0;
@@ -575,7 +616,6 @@ int runSend(const Options &options, const Relay &relay)
     }
 
     panel.finish();
-    platform::fileClose(fd);
     ws.closeGracefully();
 
     // Итог раздачи — двумя числами, и второе важнее первого.

@@ -381,6 +381,182 @@ rm -f gone.bin gone_seed.out gone_late.out
 sleep 1
 
 echo
+echo "=== 13. Папка целиком ==="
+# Дерево со всем, на чём обычно ломаются: вложенность, кириллица,
+# пробелы в именах, пустая папка, пустой файл и файл через границу чанка.
+rm -rf tree_src tree_out
+mkdir -p "tree_src/документы/2024 отчёты" tree_src/src/nested tree_src/пустая
+head -c 3000000 /dev/urandom > "tree_src/документы/2024 отчёты/январь.bin"
+head -c 700000  /dev/urandom > tree_src/src/main.cpp
+head -c 1500000 /dev/urandom > tree_src/src/nested/deep.dat
+: > tree_src/пустой.txt
+echo "привет" > "tree_src/читай меня.md"
+
+LINK=$(start_send tree_src)
+if [ -z "$LINK" ]; then bad "ссылка на папку не появилась"; else
+    timeout 300 $FERRY get "$LINK" -y -o tree_out > "$WORK/tree-get.log" 2>&1
+    RT=$?
+    if [ $RT -ne 0 ]; then
+        bad "папка не приехала (код $RT)"; tail -5 "$WORK/tree-get.log"
+    elif diff -r tree_src tree_out > "$WORK/tree-diff.log" 2>&1; then
+        ok "дерево совпало байт в байт (diff -r)"
+    else
+        bad "дерево разошлось"; head -10 "$WORK/tree-diff.log"
+    fi
+
+    if [ -d "tree_out/пустая" ]; then
+        ok "пустая папка доехала"
+    else
+        bad "пустая папка потерялась"
+    fi
+    if [ -f "tree_out/пустой.txt" ] && [ ! -s "tree_out/пустой.txt" ]; then
+        ok "пустой файл доехал пустым"
+    else
+        bad "пустой файл потерялся"
+    fi
+    # Недокачки и карты после успешного приёма оставаться не должны.
+    if [ ! -e tree_out.ferry-part ] && [ ! -e tree_out.ferry-map ]; then
+        ok "временное убрано"
+    else
+        bad "осталась недокачка или карта"
+    fi
+fi
+stop_send
+
+# И докачка дерева: недокачка здесь — КАТАЛОГ, а не файл, и это
+# отдельный путь в коде.
+rm -rf tree_src tree_out tree_out.ferry-part tree_out.ferry-map
+# Два гигабайта из /dev/zero, а не из /dev/urandom, и это не лень: том
+# нужен такой, чтобы передача точно не успела закончиться до обрыва,
+# а случайных данных столько генерируется дольше, чем весь тест.
+# Раскладку по файлам проверяет первая половина сценария, где данные
+# случайные, а здесь проверяется докачка.
+mkdir -p tree_src/a tree_src/b
+head -c 1073741824 /dev/zero > tree_src/a/big1.bin
+head -c 1073741824 /dev/zero > tree_src/b/big2.bin
+LINK=$(start_send tree_src)
+if [ -z "$LINK" ]; then bad "ссылка не появилась"; else
+    timeout 300 $FERRY get "$LINK" -y -o tree_out > "$WORK/tree-r1.log" 2>&1 &
+    GP=$!
+    sleep 2
+    kill -INT $GP 2>/dev/null || true
+    wait $GP 2>/dev/null || true
+
+    if [ -d tree_out.ferry-part ] && [ -f tree_out.ferry-map ]; then
+        ok "после обрыва остались каталог недокачки и карта"
+    else
+        bad "недокачка дерева не сохранилась"
+    fi
+
+    timeout 300 $FERRY get "$LINK" -y -o tree_out > "$WORK/tree-r2.log" 2>&1
+    if diff -r tree_src tree_out > /dev/null 2>&1; then
+        ok "докачка дерева дошла до конца"
+    else
+        bad "после докачки дерево разошлось"; tail -4 "$WORK/tree-r2.log"
+    fi
+    if grep -qa 'продолжаем' "$WORK/tree-r2.log"; then
+        ok "клиент сказал, что продолжает"
+    else
+        bad "про продолжение ничего не сказал"
+    fi
+fi
+stop_send
+rm -rf tree_src tree_out tree_out.ferry-part tree_out.ferry-map
+
+echo
+echo ""
+echo "=== 15. Что в том не берётся, о том сказано вслух ==="
+# Симлинки и не-файлы (FIFO, сокеты, устройства) в том не едут. Это
+# правильно, но молча так делать нельзя: человек отправит папку, получит
+# на той стороне неполное дерево и никогда не узнает почему. Проверяем
+# именно то, что отправитель СКАЗАЛ, а не только то, что он пропустил.
+rm -rf skip_src skip_out
+mkdir -p skip_src/внутри
+echo "настоящий файл" > skip_src/внутри/real.txt
+head -c 200000 /dev/urandom > skip_src/данные.bin
+ln -s /etc/hostname skip_src/ссылка-на-файл
+ln -s /tmp skip_src/ссылка-на-папку
+mkfifo skip_src/труба
+
+LINK=$(start_send skip_src)
+if [ -z "$LINK" ]; then bad "ссылка не появилась"; else
+    if grep -q "пропущено" "$WORK/send.log"; then
+        ok "отправитель предупредил о пропущенном"
+    else
+        bad "о пропущенном промолчали"; tail -12 "$WORK/send.log"
+    fi
+    if grep -q "ссылка-на-файл" "$WORK/send.log" \
+       && grep -q "ссылка-на-папку" "$WORK/send.log"; then
+        ok "обе ссылки названы поимённо"
+    else
+        bad "ссылки не названы"; tail -12 "$WORK/send.log"
+    fi
+    if grep -q "труба" "$WORK/send.log"; then
+        ok "FIFO не попал в том и назван"
+    else
+        bad "FIFO не назван — а он либо в томе, либо потерян молча"
+        tail -12 "$WORK/send.log"
+    fi
+    # Числительные согласованы: здесь ровно два файла и две записи
+    # пропущено (две ссылки и труба — три). «2 файлов» в готовом
+    # продукте выглядит как недоделанный перевод.
+    if grep -q "2 файла" "$WORK/send.log"        && grep -q "3 записи" "$WORK/send.log"; then
+        ok "числительные согласованы со словами"
+    else
+        bad "числительные не согласованы"
+        grep -E "состав|пропущено" "$WORK/send.log"
+    fi
+
+    timeout 300 $FERRY get "$LINK" -y -o skip_out > "$WORK/skip-get.log" 2>&1
+    if [ $? -ne 0 ]; then
+        bad "том с пропусками не приехал"; tail -5 "$WORK/skip-get.log"
+    elif [ -f skip_out/внутри/real.txt ] \
+         && [ -f skip_out/данные.bin ] \
+         && [ ! -e skip_out/ссылка-на-файл ] \
+         && [ ! -e skip_out/труба ]; then
+        ok "приехало ровно то, что обещали: файлы есть, пропущенного нет"
+    else
+        bad "состав принятого дерева не тот"; ls -la skip_out
+    fi
+    # Самое важное: то, что доехало, должно совпасть побайтно.
+    if cmp -s skip_src/данные.bin skip_out/данные.bin; then
+        ok "оставшиеся файлы целы"
+    else
+        bad "файлы побились"
+    fi
+fi
+stop_send
+
+echo "=== 14. ferry uninstall убирает за собой ==="
+# Ставим копию в песочницу и смотрим, что осталось после неё.
+UNI="$WORK/uninstall"
+rm -rf "$UNI"
+mkdir -p "$UNI/bin" "$UNI/home"
+cp "$FERRY" "$UNI/bin/ferry"
+XDG_CONFIG_HOME="$UNI/home" "$UNI/bin/ferry" config > /dev/null 2>&1 || true
+mkdir -p "$UNI/home/ferry"
+printf 'relay = http://localhost:8080\n' > "$UNI/home/ferry/config"
+
+XDG_CONFIG_HOME="$UNI/home" "$UNI/bin/ferry" uninstall -y > "$WORK/uninstall.log" 2>&1
+RU=$?
+if [ $RU -eq 0 ]; then
+    ok "деинсталляция отработала без ошибок"
+else
+    bad "деинсталляция вернула $RU"; tail -5 "$WORK/uninstall.log"
+fi
+if [ ! -e "$UNI/bin/ferry" ]; then
+    ok "бинарь удалён"
+else
+    bad "бинарь остался на месте"
+fi
+if [ ! -e "$UNI/home/ferry" ]; then
+    ok "каталог настроек удалён"
+else
+    bad "настройки остались: $(ls -A "$UNI/home/ferry")"
+fi
+rm -rf "$UNI"
+
+echo
 echo "=== 8. Сервер по-прежнему ничего не хранит ==="
 curl -s localhost:8080/api/health | jq -c '{transfers, window_bytes_used, stores_on_disk}'
 echo "в веб-корне релея:"; ls -A "$WORK/web" | wc -l | sed "s/^/  файлов: /"

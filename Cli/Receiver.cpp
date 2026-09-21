@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "Cli/ChunkPump.h"
+#include "Cli/VolumeFile.h"
 #include "Cli/Signals.h"
 #include "Cli/net/WebSocketClient.h"
 #include "Cli/platform/Platform.h"
@@ -23,6 +24,7 @@
 #include "core/Link.h"
 #include "core/Manifest.h"
 #include "core/Protocol.h"
+#include "core/VolumeLayout.h"
 
 namespace ferry::cli {
 namespace {
@@ -387,11 +389,6 @@ int runGet(const Options &options)
         std::fprintf(stderr, "Размер в манифесте не сходится с размером раздачи.\n");
         return 1;
     }
-    if (manifest.isTree()) {
-        std::fprintf(stderr, "Это папка, а папки принимать эта версия ещё не умеет.\n");
-        return 1;
-    }
-
     Bytes hashesPlain;
     if (!openChunk(keys.meta, meta.noncePrefix.data(), kMetaLabelHashList, plan.chunkCount,
                    meta.hashList.data(), meta.hashList.size(), hashesPlain)) {
@@ -416,18 +413,40 @@ int runGet(const Options &options)
     // ---- 3. Что это и куда класть ----
     const std::string outName = safeFileName(manifest.name);
     if (outName.empty()) {
-        std::fprintf(stderr, "Имя из манифеста не годится для файла.\n");
+        std::fprintf(stderr, "Имя из манифеста не годится.\n");
         return 1;
     }
     const std::string outPath = options.outPath.empty() ? outName : options.outPath;
+
+    // Недокачка дерева — это каталог, а не файл: переименовать в конце
+    // надо всё сразу, иначе на диске какое-то время лежит полутом под
+    // настоящим именем, и человек решит, что всё готово.
     const std::string partPath = outPath + ".ferry-part";
     const std::string mapPath = outPath + ".ferry-map";
+
+    // Раскладка тома: какой байт какому файлу принадлежит. Для одиночного
+    // файла это один файл во весь том, и дальше вся запись идёт одной
+    // дорогой — получатель не знает, сколько там файлов, ровно как и
+    // сервер.
+    VolumeLayout layout;
+    layout.build(manifest);
 
     const int cells = std::min(width(), 78);
     std::printf("%s%s%s\n", dim(), ruleTop("том", cells).c_str(), reset());
     std::printf("%s│%s %s\n", dim(), reset(),
                 field("имя", std::string(accent()) + manifest.name + reset()).c_str());
     std::printf("%s│%s %s\n", dim(), reset(), field("размер", bytes(manifest.total)).c_str());
+    if (manifest.isTree()) {
+        uint64_t files = 0, dirs = 0;
+        for (const ManifestEntry &e : manifest.entries)
+            (e.isDir ? dirs : files) += 1;
+        std::printf("%s│%s %s\n", dim(), reset(),
+                    field("состав",
+                          countOf(files, "файл", "файла", "файлов")
+                              + (dirs ? ", " + countOf(dirs, "пустая папка",
+                                                      "пустые папки", "пустых папок")
+                                      : std::string())).c_str());
+    }
     std::printf("%s│%s %s\n", dim(), reset(),
                 field("чанки", count(plan.chunkCount) + " по " + bytes(plan.chunkSize)).c_str());
     std::printf("%s│%s %s\n", dim(), reset(),
@@ -462,26 +481,32 @@ int runGet(const Options &options)
         }
     }
 
-    // ---- 4. Файл и карта принятого ----
+    // ---- 4. Том на диске и карта принятого ----
     ChunkMap map;
     map.init(mapPath, plan.chunkCount, plan.chunkSize, plan.totalBytes, manifest.root);
     const bool resuming = map.load() && platform::fileExists(partPath);
     if (!resuming) {
         map.init(mapPath, plan.chunkCount, plan.chunkSize, plan.totalBytes, manifest.root);
-        platform::fileRemove(partPath);
+        // Недокачки прошлого раза может не быть, а может быть чужая — в
+        // обоих случаях начинаем с чистого места. Дерево сносим целиком:
+        // половина старого тома под новым именем хуже, чем ничего.
+        if (platform::fileExists(partPath))
+            platform::removeTree(partPath);
     }
 
-    const platform::File fd = platform::fileOpenReadWrite(partPath);
-    if (fd == platform::kInvalidFile) {
-        std::fprintf(stderr, "Не смог создать %s\n", partPath.c_str());
-        return 1;
-    }
-    // Растягиваем файл сразу на полный размер: дальше мы пишем по
-    // смещениям, и место должно быть заранее — иначе первая же дырка
-    // превратится в ошибку записи на середине тома.
-    if (!platform::fileTruncate(fd, plan.totalBytes)) {
-        std::fprintf(stderr, "Не хватает места под %s\n", bytes(plan.totalBytes).c_str());
-        platform::fileClose(fd);
+    VolumeFile volume;
+    if (manifest.isTree()) {
+        if (!platform::makeDirectories(partPath)) {
+            std::fprintf(stderr, "Не смог создать %s\n", partPath.c_str());
+            return 1;
+        }
+        if (!volume.openTree(partPath, layout, true)
+            || !volume.createEmpties(partPath, manifest)) {
+            std::fprintf(stderr, "%s\n", volume.error().c_str());
+            return 1;
+        }
+    } else if (!volume.openSingle(partPath, true, plan.totalBytes)) {
+        std::fprintf(stderr, "%s\n", volume.error().c_str());
         return 1;
     }
 
@@ -502,13 +527,13 @@ int runGet(const Options &options)
     Bytes challenge;
     if (!apiFetchChallenge(relay, link.id, challenge, &err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
-        platform::fileClose(fd);
+        volume.close();
         return 1;
     }
     const Bytes proof = proveKeyOwnership(keys.verifier, challenge.data(), challenge.size());
     if (proof.size() != 32) {
         std::fprintf(stderr, "Не удалось посчитать доказательство владения ключом.\n");
-        platform::fileClose(fd);
+        volume.close();
         return 1;
     }
 
@@ -517,7 +542,7 @@ int runGet(const Options &options)
     if (!ws.connectTo(relay.host, relay.port, relay.tls, relay.insecure, std::string(kWsPath),
                       20000, &err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
-        platform::fileClose(fd);
+        volume.close();
         return 1;
     }
 
@@ -569,7 +594,7 @@ int runGet(const Options &options)
                 std::fprintf(stderr, "%s\n", explainError(reason).c_str());
             else
                 std::fprintf(stderr, "Соединение оборвалось: %s\n", ws.error().c_str());
-            platform::fileClose(fd);
+            volume.close();
             return 1;
         }
         net::WsMessage msg;
@@ -587,14 +612,14 @@ int runGet(const Options &options)
                 serverSpeaksRanges = announces(v, "ranges");
             } else if (type == "error") {
                 std::fprintf(stderr, "%s\n", explainError(v["reason"].toString()).c_str());
-                platform::fileClose(fd);
+                volume.close();
                 return 1;
             }
         }
     }
     if (!accepted) {
         std::fprintf(stderr, "Сервер не пустил к раздаче.\n");
-        platform::fileClose(fd);
+        volume.close();
         return 1;
     }
 
@@ -626,7 +651,7 @@ int runGet(const Options &options)
     // Насос для отдачи: читает из собственной недокачки и шифрует заново.
     // Шифротекст получается байт в байт тот же — см. ChunkPump.h.
     ChunkPump pump;
-    pump.init(fd, plan, keys.data, meta.noncePrefix.data());
+    pump.init(volume, plan, keys.data, meta.noncePrefix.data());
     ChunkSet serveQueue(plan.chunkCount);
     uint64_t servedChunks = 0;
 
@@ -770,12 +795,13 @@ int runGet(const Options &options)
             }
             badInARow = 0;
 
-            const int64_t written = platform::fileWriteAt(fd, plainChunk.data(),
-                                                          plainChunk.size(),
-                                                          plan.offsetOf(index));
+            const int64_t written =
+                volume.writeAt(plainChunk.data(), plainChunk.size(), plan.offsetOf(index));
             if (written != int64_t(plainChunk.size())) {
                 failed = true;
-                failure = "не удалось записать на диск — кончилось место?";
+                failure = volume.error().empty()
+                              ? std::string("не удалось записать на диск — кончилось место?")
+                              : volume.error();
                 break;
             }
 
@@ -902,8 +928,8 @@ int runGet(const Options &options)
     }
 
     if (failed) {
-        platform::fileSync(fd);
-        platform::fileClose(fd);
+        volume.sync();
+        volume.close();
         ws.closeGracefully();
         std::fprintf(stderr, "\n%sПриём прерван:%s %s\n", bad(), reset(), failure.c_str());
         std::fprintf(stderr, "%sПринятое сохранено в %s — при следующем запуске продолжим.%s\n",
@@ -912,8 +938,8 @@ int runGet(const Options &options)
     }
 
     if (stopRequested()) {
-        platform::fileSync(fd);
-        platform::fileClose(fd);
+        volume.sync();
+        volume.close();
         ws.closeGracefully();
         std::printf("\n%sОстановлено. Принятое сохранено в %s.%s\n", dim(), partPath.c_str(),
                     reset());
@@ -921,17 +947,20 @@ int runGet(const Options &options)
     }
 
     // ---- 8. Готово ----
-    if (!platform::fileSync(fd)) {
+    if (!volume.sync()) {
         std::fprintf(stderr, "Не удалось дописать файл на диск.\n");
-        platform::fileClose(fd);
+        volume.close();
         return 1;
     }
-    platform::fileClose(fd);
+    volume.close();
     // Сокет НЕ закрываем здесь: с --seed мы остаёмся на связи и
     // отдаём чанки дальше. Закрытие — в конце, по обоим путям.
     if (!options.seed)
         ws.closeGracefully();
 
+    // Переименование целиком — и для файла, и для дерева. До этой
+    // строки под настоящим именем нет ничего: полутом, который
+    // выглядит готовым, хуже отсутствия тома.
     if (!platform::fileRename(partPath, outPath)) {
         std::fprintf(stderr, "Не удалось переименовать %s в %s\n", partPath.c_str(),
                      outPath.c_str());
@@ -941,7 +970,7 @@ int runGet(const Options &options)
 
     const int64_t tookMs = nowMs() - startedMs;
     std::printf("\n%s%s%s\n", ok(), ruleTop("готово", cells).c_str(), reset());
-    std::printf("%s│%s %s\n", ok(), reset(), field("файл", outPath).c_str());
+    std::printf("%s│%s %s\n", ok(), reset(), field(manifest.isTree() ? "каталог" : "файл", outPath).c_str());
     std::printf("%s│%s %s\n", ok(), reset(), field("размер", bytes(plan.totalBytes)).c_str());
     std::printf("%s│%s %s\n", ok(), reset(),
                 field("время", duration(tookMs) + "  ("
@@ -960,13 +989,15 @@ int runGet(const Options &options)
     if (!options.seed)
         return 0;
 
-    const platform::File seedFd = platform::fileOpenRead(outPath);
-    if (seedFd == platform::kInvalidFile) {
-        std::fprintf(stderr, "%sФайл не открылся на чтение — сидировать не из чего.%s\n", dim(),
+    VolumeFile seed;
+    const bool seedOpened = manifest.isTree() ? seed.openTree(outPath, layout, false)
+                                              : seed.openSingle(outPath, false, plan.totalBytes);
+    if (!seedOpened) {
+        std::fprintf(stderr, "%sТом не открылся на чтение — сидировать не из чего.%s\n", dim(),
                      reset());
         return 0;
     }
-    pump.init(seedFd, plan, keys.data, meta.noncePrefix.data());
+    pump.init(seed, plan, keys.data, meta.noncePrefix.data());
 
     std::printf("\n%sОстаюсь источником для остальных. Ctrl-C — выйти.%s\n\n", dim(), reset());
 
@@ -1018,7 +1049,7 @@ int runGet(const Options &options)
         });
     }
     seedPanel.finish();
-    platform::fileClose(seedFd);
+    seed.close();
     ws.closeGracefully();
     std::printf("%sСидирование остановлено. Отдано %s.%s\n", dim(),
                 bytes(servedChunks * uint64_t(plan.chunkSize)).c_str(), reset());

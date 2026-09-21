@@ -39,6 +39,11 @@ std::string duration(int64_t ms);
 std::string percent(double fraction);
 std::string count(uint64_t value);
 
+// Число со словом в нужном числе: countOf(1, "файл", "файла", "файлов").
+// «1 файлов» в готовом продукте выглядит как недоделанный перевод, а это текст,
+// который человек видит каждый раз.
+std::string countOf(uint64_t value, const char *one, const char *few, const char *many);
+
 // Горизонтальная полоса прогресса шириной cells ячеек.
 std::string bar(double fraction, int cells);
 

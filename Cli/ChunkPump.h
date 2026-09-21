@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "Cli/VolumeFile.h"
 #include "Cli/net/WebSocketClient.h"
 #include "Cli/platform/Platform.h"
 #include "core/Chunker.h"
@@ -32,9 +33,9 @@ namespace ferry::cli {
 class ChunkPump
 {
 public:
-    // fd остаётся во владении вызывающего: у отправителя это исходный
-    // файл, у получателя — его же недокачка, открытая на чтение и запись.
-    void init(platform::File fd, const ChunkPlan &plan, const Key32 &dataKey,
+    // Том остаётся во владении вызывающего: у отправителя это исходный
+    // файл или дерево, у получателя — его же недокачка.
+    void init(VolumeFile &volume, const ChunkPlan &plan, const Key32 &dataKey,
               const uint8_t noncePrefix[kNoncePrefixSize]);
 
     // false — чанк не ушёл, причина в error(). Ошибка здесь всегда
@@ -47,7 +48,7 @@ public:
     const std::string &error() const { return m_error; }
 
 private:
-    platform::File m_fd = platform::kInvalidFile;
+    VolumeFile *m_volume = nullptr;
     ChunkPlan m_plan;
     Key32 m_key{};
     uint8_t m_noncePrefix[kNoncePrefixSize] = {};

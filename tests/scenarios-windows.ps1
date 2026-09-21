@@ -170,6 +170,74 @@ if (-not $s.Link) {
 }
 
 Write-Host ""
+Write-Host "=== 4. Папка целиком ==="
+# То же, что и в линуксовом сценарии, но с тем, на чём ломается именно
+# Windows: разделители пути, кириллица в именах и пробелы.
+#
+# Пути здесь собираются Join-Path, а не склейкой через обратный слэш, и
+# это не вкусовщина: в .ps1 обратный слэш перед буквой — постоянный
+# источник «Illegal characters in path», а Join-Path такой возможности
+# не оставляет.
+$treeSrc = Join-Path $root 'дерево исходное'
+$treeOut = Join-Path $root 'дерево принятое'
+Remove-Item -Recurse -Force $treeSrc, $treeOut -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path $treeSrc 'документы') '2024 отчёты') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path $treeSrc 'code') 'nested') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $treeSrc 'пустая папка') | Out-Null
+
+function New-RandFile($path, $size) {
+    $fs = [System.IO.File]::Create($path)
+    $buf = New-Object byte[] (65536)
+    $rng = [System.Random]::new($size)
+    $left = $size
+    while ($left -gt 0) {
+        $take = [Math]::Min($left, $buf.Length)
+        $rng.NextBytes($buf)
+        $fs.Write($buf, 0, $take)
+        $left -= $take
+    }
+    $fs.Close()
+}
+New-RandFile (Join-Path (Join-Path (Join-Path $treeSrc 'документы') '2024 отчёты') 'январь.bin') 3000000
+New-RandFile (Join-Path (Join-Path $treeSrc 'code') 'main.cpp') 700000
+New-RandFile (Join-Path (Join-Path (Join-Path $treeSrc 'code') 'nested') 'deep.dat') 1500000
+New-Item -ItemType File -Path (Join-Path $treeSrc 'пустой.txt') | Out-Null
+
+function Get-TreeFingerprint($base) {
+    $acc = ''
+    foreach ($it in (Get-ChildItem -Recurse -Force $base | Sort-Object FullName)) {
+        $rel = $it.FullName.Substring($base.Length)
+        if ($it.PSIsContainer) { $acc += "D|$rel`n" }
+        else { $acc += "F|$rel|$($it.Length)|$((Get-FileHash $it.FullName -Algorithm SHA256).Hash)`n" }
+    }
+    return $acc
+}
+
+$st = Start-Sender $treeSrc
+if (-not $st.Link) {
+    Bad "ссылка на папку не появилась"
+} else {
+    & $Ferry get $st.Link -y -o $treeOut 2>&1 | Out-File (Join-Path $root 'tree-get.log') -Encoding utf8
+    if ($LASTEXITCODE -eq 0 -and (Get-TreeFingerprint $treeSrc) -eq (Get-TreeFingerprint $treeOut)) {
+        Ok "дерево совпало байт в байт, вместе с кириллицей и пробелами"
+    } else {
+        Bad "дерево разошлось"
+        Get-Content (Join-Path $root 'tree-get.log') -Encoding UTF8 -ErrorAction SilentlyContinue | Select-Object -Last 4
+    }
+    if (Test-Path (Join-Path $treeOut 'пустая папка') -PathType Container) {
+        Ok "пустая папка доехала"
+    } else {
+        Bad "пустая папка потерялась"
+    }
+    if (-not (Test-Path ($treeOut + '.ferry-part')) -and -not (Test-Path ($treeOut + '.ferry-map'))) {
+        Ok "временное убрано"
+    } else {
+        Bad "осталась недокачка"
+    }
+    if (-not $st.Proc.HasExited) { Stop-Process -Id $st.Proc.Id -Force }
+}
+
+Write-Host ""
 Write-Host "================================"
 Write-Host "прошло: $pass, провалено: $fail"
 Write-Host "================================"

@@ -160,6 +160,21 @@ std::string count(uint64_t value)
     return groupDigits(value);
 }
 
+std::string countOf(uint64_t value, const char *one, const char *few, const char *many)
+{
+    // Обычное русское правило: 11–14 — исключение из всех трёх веток.
+    const uint64_t last = value % 10;
+    const uint64_t two = value % 100;
+    const char *word = many;
+    if (two < 11 || two > 14) {
+        if (last == 1)
+            word = one;
+        else if (last >= 2 && last <= 4)
+            word = few;
+    }
+    return groupDigits(value) + " " + word;
+}
+
 std::string bar(double fraction, int cells)
 {
     cells = std::max(4, cells);

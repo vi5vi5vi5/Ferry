@@ -79,6 +79,7 @@ add_library(ferry-core STATIC
     Manifest.h    Manifest.cpp
     Protocol.h
     Types.h
+    VolumeLayout.h VolumeLayout.cpp
 )
 
 # Инклуды пишутся от корня репозитория: #include "core/Chunker.h".

@@ -16,6 +16,7 @@
 #include "Cli/Receiver.h"
 #include "Cli/Relay.h"
 #include "Cli/Sender.h"
+#include "Cli/Uninstall.h"
 #include "Cli/Signals.h"
 #include "Cli/platform/Platform.h"
 #include "Cli/ui/Term.h"
@@ -105,6 +106,9 @@ int main(int argc, char **argv)
     case Options::Command::Config:
         printConfig(options);
         return 0;
+
+    case Options::Command::Uninstall:
+        return runUninstall(options);
 
     case Options::Command::Send: {
         Relay relay;

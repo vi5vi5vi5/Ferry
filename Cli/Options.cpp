@@ -110,6 +110,8 @@ Options Options::parse(const std::vector<std::string> &args)
         o.command = Command::Version;
     else if (cmd == "config")
         o.command = Command::Config;
+    else if (cmd == "uninstall")
+        o.command = Command::Uninstall;
     else if (cmd == "help" || cmd == "--help" || cmd == "-h")
         o.command = Command::Help;
     else {
@@ -191,8 +193,9 @@ void printHelp()
 {
     using namespace ferry::ui;
     std::printf("%sFerry%s — паром для файлов. Перевёз и ушёл.\n\n", bold(), reset());
-    std::printf("  %sferry send <файл>%s          отдать файл, получить ссылку\n", bold(), reset());
-    std::printf("  %sferry get \"<ссылка>\"%s       забрать том по ссылке\n\n", bold(), reset());
+    std::printf("  %sferry send <файл|папка>%s    отдать файл или каталог, получить ссылку\n", bold(), reset());
+    std::printf("  %sferry get \"<ссылка>\"%s       забрать том по ссылке\n", bold(), reset());
+    std::printf("  %sferry uninstall%s            убрать Ferry с этой машины\n\n", bold(), reset());
     std::printf("Ключи send:\n");
     std::printf("  --uses <N>            сколько раз ссылкой можно воспользоваться\n");
     std::printf("  --ttl <срок>          сколько живёт раздача: 90m, 24h, 7d\n");
