@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "Cli/ChunkPump.h"
+#include "Cli/Hasher.h"
 #include "Cli/Tree.h"
 #include "Cli/VolumeFile.h"
 #include "Cli/Signals.h"
@@ -196,47 +197,7 @@ int runSend(const Options &options, const Relay &relay)
         std::printf("\n");
     }
 
-    // ---- 2. Хеши ----
-    // Полный проход по файлу до начала раздачи. На пяти гигабайтах это
-    // секунды, но молчать нельзя: человек не должен гадать, почему ничего
-    // не происходит.
-    HashList hashes;
-    hashes.reserve(size_t(plan.chunkCount));
-    {
-        std::vector<uint8_t> buffer(plan.chunkSize);
-        LivePanel panel;
-        RateMeter meter;
-        const int64_t startedMs = nowMs();
-        for (uint64_t i = 0; i < plan.chunkCount; ++i) {
-            const uint32_t len = plan.sizeOf(i);
-            const int64_t got = volume.readAt(buffer.data(), len, plan.offsetOf(i));
-            if (got != int64_t(len)) {
-                panel.finish();
-                std::fprintf(stderr, "\n%s\n", volume.error().empty()
-                                         ? "Файл читается не целиком — его изменили прямо сейчас?"
-                                         : volume.error().c_str());
-                return 1;
-            }
-            hashes.append(blake3(buffer.data(), size_t(len)));
-            meter.add(len);
-
-            if ((i % 16) == 0 || i + 1 == plan.chunkCount) {
-                const double frac = double(i + 1) / double(plan.chunkCount);
-                panel.update({std::string("считаю хеши  ") + bar(frac, cells - 30) + "  "
-                              + percent(frac) + "  " + rate(meter.value())});
-            }
-            if (stopRequested()) {
-                panel.finish();
-                return 130;
-            }
-        }
-        panel.finish();
-        std::printf("%sхеши готовы за %s — BLAKE3, %s%s\n", dim(),
-                    duration(nowMs() - startedMs).c_str(),
-                    countOf(hashes.size(), "хеш", "хеша", "хешей").c_str(), reset());
-    }
-
-    // ---- 3. Ключи и метаданные ----
+    // ---- 2. Ключи ----
     bool ok = false;
     const Key32 master = randomKey32(&ok);
     if (!ok) {
@@ -252,28 +213,106 @@ int runSend(const Options &options, const Relay &relay)
         return 1;
     }
 
-    // Манифест уже собран выше — здесь остаётся вписать корневой хеш,
-    // который стал известен только после подсчёта.
-    manifest.root = hashes.root();
-    const std::string manifestJson = manifest.toJson();
-
-    Bytes encManifest, encHashes;
-    const Bytes rawHashes = hashes.serialize();
-    if (!sealChunk(keys.meta, noncePrefix.data(), kMetaLabelManifest, plan.chunkCount,
-                   reinterpret_cast<const uint8_t *>(manifestJson.data()), manifestJson.size(),
-                   encManifest)
-        || !sealChunk(keys.meta, noncePrefix.data(), kMetaLabelHashList, plan.chunkCount,
-                      rawHashes.data(), rawHashes.size(), encHashes)) {
-        std::fprintf(stderr, "Не удалось зашифровать метаданные.\n");
-        return 1;
-    }
-
-    // ---- 4. Заводим раздачу ----
+    // ---- 3. Заводим раздачу и узнаём, что умеет релей ----
+    // Раньше это шло после хешей. Теперь — до: от ответа зависит, считать
+    // ли том целиком заранее или отдавать хеши на лету.
     CreatedTransfer created;
     std::string err;
     if (!apiCreateTransfer(relay, created, &err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
+    }
+    const int64_t createdAtMs = nowMs();
+    const bool streamHashes = created.hasFeature(kFeatureStreamHashes);
+
+    // ---- 4. Хеши ----
+    // На лету (релей умеет): считаются в фоне, ссылка появляется сразу, а
+    // раздача начинается с первого посчитанного чанка. Архив на сто
+    // гигабайт больше не держит человека у полосы «считаю хеши».
+    //
+    // Заранее (релей старый): как раньше, весь том до ссылки — но уже
+    // тем же фоновым хешером, где диск и процессор работают одновременно.
+    Hasher hasher;
+    {
+        Hasher::Source src;
+        src.path = options.path;
+        src.tree = info.isDirectory;
+        src.layout = &layout;
+        src.total = total;
+        std::string herr;
+        if (!hasher.start(src, plan, &herr)) {
+            std::fprintf(stderr, "%s\n", herr.c_str());
+            return 1;
+        }
+    }
+    const int64_t hashStartedMs = nowMs();
+
+    Bytes encManifest, encHashes;
+    if (!streamHashes) {
+        LivePanel panel;
+        RateMeter meter;
+        uint64_t lastBytes = 0;
+        while (!hasher.finished()) {
+            if (hasher.failed()) {
+                panel.finish();
+                std::fprintf(stderr, "\n%s\n", hasher.error().c_str());
+                return 1;
+            }
+            if (stopRequested()) {
+                panel.finish();
+                hasher.stop();
+                return 130;
+            }
+            platform::sleepMs(50);
+            const uint64_t b = hasher.bytesDone();
+            meter.add(b - lastBytes);
+            lastBytes = b;
+            const double frac = double(hasher.done()) / double(plan.chunkCount);
+            panel.update({std::string("считаю хеши  ") + bar(frac, cells - 30) + "  "
+                          + percent(frac) + "  " + rate(meter.value())});
+        }
+        panel.finish();
+        const HashList hashes = hasher.list();
+        std::printf("%sхеши готовы за %s — BLAKE3, %s%s\n", dim(),
+                    duration(nowMs() - hashStartedMs).c_str(),
+                    countOf(hashes.size(), "хеш", "хеша", "хешей").c_str(), reset());
+
+        // Манифест уже собран выше — здесь остаётся вписать корневой хеш,
+        // который стал известен только после подсчёта.
+        manifest.root = hashes.root();
+        const std::string manifestJson = manifest.toJson();
+        const Bytes rawHashes = hashes.serialize();
+        if (!sealChunk(keys.meta, noncePrefix.data(), kMetaLabelManifest, plan.chunkCount,
+                       reinterpret_cast<const uint8_t *>(manifestJson.data()),
+                       manifestJson.size(), encManifest)
+            || !sealChunk(keys.meta, noncePrefix.data(), kMetaLabelHashList, plan.chunkCount,
+                          rawHashes.data(), rawHashes.size(), encHashes)) {
+            std::fprintf(stderr, "Не удалось зашифровать метаданные.\n");
+            return 1;
+        }
+
+        // Черновик раздачи на релее живёт минуту с момента создания, а
+        // подсчёт на медленном диске идёт дольше: тогда первый черновик уже
+        // убран, и нужен свежий. Но только тогда — заводить второй каждый
+        // раз значило бы вдвое быстрее выбирать квоту релея на создание
+        // раздач, а она у него одна на всех. 45 секунд — с запасом на
+        // шифрование, подключение и offer.
+        if (nowMs() - createdAtMs > 45000 && !apiCreateTransfer(relay, created, &err)) {
+            std::fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+    } else {
+        // Промежуточный манифест: всё то же, но без корня — корня ещё нет.
+        // И под своей меткой: итоговый уйдёт позже под обычной, а один nonce
+        // под двумя разными текстами GCM не прощает.
+        manifest.streamHashes = true;
+        const std::string manifestJson = manifest.toJson();
+        if (!sealChunk(keys.meta, noncePrefix.data(), kMetaLabelStreamManifest, plan.chunkCount,
+                       reinterpret_cast<const uint8_t *>(manifestJson.data()),
+                       manifestJson.size(), encManifest)) {
+            std::fprintf(stderr, "Не удалось зашифровать метаданные.\n");
+            return 1;
+        }
     }
 
     TransferLink link;
@@ -320,7 +359,10 @@ int runSend(const Options &options, const Relay &relay)
         offer.set("verifier",
                   json::Value::make(base64UrlEncode(keys.verifier.data(), keys.verifier.size())));
         offer.set("manifest", json::Value::make(b64(encManifest)));
-        offer.set("hash_list", json::Value::make(b64(encHashes)));
+        if (streamHashes)
+            offer.set("hash_mode", json::Value::make("stream"));
+        else
+            offer.set("hash_list", json::Value::make(b64(encHashes)));
         offer.set("mode", json::Value::make("key"));
 
         json::Value policy = json::Value::object();
@@ -460,6 +502,16 @@ int runSend(const Options &options, const Relay &relay)
     std::vector<PeerRow> peers;
     RateMeter meter;
     LivePanel panel;
+
+    // Хеши на лету. hashesSent — сколько чанков подряд с начала уже
+    // объявлено получателям: дальше этой границы чанки не уходят.
+    // При хешах, посчитанных заранее, граница сразу в конце тома.
+    uint64_t hashesSent = streamHashes ? 0 : plan.chunkCount;
+    bool hashesDoneSent = !streamHashes;
+    int64_t lastSegmentMs = 0;
+    int64_t hashesTookMs = streamHashes ? -1 : nowMs() - hashStartedMs;
+    RateMeter hashMeter;
+    uint64_t hashBytesSeen = 0;
     const int64_t startedMs = nowMs();
     bool failed = false;
     std::string failure;
@@ -508,6 +560,86 @@ int runSend(const Options &options, const Relay &relay)
         if (failed)
             break;
 
+        // ---- хеши на лету ----
+        // Сегменты уходят пачками: по 256 хешей или раз в 300 мс, чтобы не
+        // слать по одному на каждый чанк. Но если живая волна упёрлась в
+        // чанк, чей хеш ещё не объявлен, сегмент уходит сразу — иначе данные
+        // стояли бы ради красоты пачки.
+        if (!hashesDoneSent) {
+            if (hasher.failed()) {
+                failed = true;
+                failure = hasher.error();
+                break;
+            }
+            const uint64_t ready = hasher.done();
+            const uint64_t hb = hasher.bytesDone();
+            hashMeter.add(hb - hashBytesSeen);
+            hashBytesSeen = hb;
+
+            const uint64_t nextLive =
+                pendingLive.empty() ? plan.chunkCount : pendingLive.firstPresent(0);
+            const bool starving = nextLive >= hashesSent && nextLive < ready;
+            const bool batch = ready - hashesSent >= 256;
+            const bool stale = ready > hashesSent && nowMs() - lastSegmentMs >= 300;
+            if (ready > hashesSent
+                && (starving || batch || stale || ready == plan.chunkCount)) {
+                while (hashesSent < ready) {
+                    const uint64_t n = std::min<uint64_t>(ready - hashesSent, kHashSegmentMax);
+                    Bytes raw(size_t(n) * 32);
+                    for (uint64_t k = 0; k < n; ++k)
+                        std::memcpy(raw.data() + size_t(k) * 32, hasher.at(hashesSent + k).data(),
+                                    32);
+                    Bytes sealed;
+                    if (!sealChunk(keys.meta, noncePrefix.data(), hashSegmentLabel(hashesSent),
+                                   plan.chunkCount, raw.data(), raw.size(), sealed)) {
+                        failed = true;
+                        failure = "не удалось зашифровать сегмент хешей";
+                        break;
+                    }
+                    json::Value seg = json::Value::object();
+                    seg.set("type", json::Value::make("hashes"));
+                    seg.set("from", json::Value::make(int64_t(hashesSent)));
+                    seg.set("count", json::Value::make(int64_t(n)));
+                    seg.set("data", json::Value::make(b64(sealed)));
+                    ws.sendText(seg.dump());
+                    hashesSent += n;
+                }
+                lastSegmentMs = nowMs();
+            }
+            if (failed)
+                break;
+
+            // Всё посчитано — итоговые манифест с корнем и список целиком.
+            // Ровно в том виде, в каком их ждёт любой клиент: с этой минуты
+            // раздача открыта и тем, кто хеши на лету принимать не умеет.
+            if (hashesSent == plan.chunkCount) {
+                const HashList full = hasher.list();
+                Manifest finalManifest = manifest;
+                finalManifest.streamHashes = false;
+                finalManifest.root = full.root();
+                const std::string finalJson = finalManifest.toJson();
+                const Bytes rawHashes = full.serialize();
+                Bytes finalManifestEnc, finalHashesEnc;
+                if (!sealChunk(keys.meta, noncePrefix.data(), kMetaLabelManifest, plan.chunkCount,
+                               reinterpret_cast<const uint8_t *>(finalJson.data()),
+                               finalJson.size(), finalManifestEnc)
+                    || !sealChunk(keys.meta, noncePrefix.data(), kMetaLabelHashList,
+                                  plan.chunkCount, rawHashes.data(), rawHashes.size(),
+                                  finalHashesEnc)) {
+                    failed = true;
+                    failure = "не удалось зашифровать итоговые метаданные";
+                    break;
+                }
+                json::Value done = json::Value::object();
+                done.set("type", json::Value::make("hashes_done"));
+                done.set("manifest", json::Value::make(b64(finalManifestEnc)));
+                done.set("hash_list", json::Value::make(b64(finalHashesEnc)));
+                ws.sendText(done.dump());
+                hashesDoneSent = true;
+                hashesTookMs = nowMs() - hashStartedMs;
+            }
+        }
+
         // Шлём ровно то, что попросили, и ровно столько, сколько влезает в
         // очередь сокета. Читаем с диска лениво: файл целиком в память не
         // попадает никогда, каким бы большим он ни был.
@@ -547,6 +679,12 @@ int runSend(const Options &options, const Relay &relay)
                     break;
             }
             hint = index;
+
+            // Чанк не уходит раньше своего хеша — на этом правиле держатся
+            // хеши на лету, и релей его проверяет. Подождём следующего
+            // сегмента: хешер почти всегда далеко впереди сети.
+            if (index >= hashesSent)
+                break;
 
             if (!pump.send(ws, index)) {
                 failed = true;
@@ -593,6 +731,15 @@ int runSend(const Options &options, const Relay &relay)
             second += std::string("   ") + warn() + "повторно "
                       + bytes(sentBytes - sentDistinctBytes) + reset();
         lines.push_back(std::move(second));
+
+        if (!hashesDoneSent) {
+            const double hfrac = double(hasher.done()) / double(plan.chunkCount);
+            lines.push_back(std::string("хеши     ") + bar(hfrac, std::max(10, cells - 40)) + "  "
+                            + percent(hfrac) + "  " + rate(hashMeter.value()));
+        } else if (streamHashes && hashesTookMs >= 0) {
+            lines.push_back(std::string(dim()) + "хеши посчитаны на лету за "
+                            + duration(hashesTookMs) + reset());
+        }
 
         if (peers.empty()) {
             lines.push_back(std::string(dim()) + "получателей пока нет — ссылка ждёт" + reset());

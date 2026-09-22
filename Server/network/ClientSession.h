@@ -71,10 +71,18 @@ public:
     enum Feature : quint32 {
         FeatureRanges = 1u << 0,     // говорит have/request диапазонами
         FeatureBackfill = 1u << 1,   // умеет отвечать на serve
+        FeatureStreamHashes = 1u << 2, // принимает хеши сегментами, на лету
     };
     quint32 features() const { return m_features; }
     void setFeatures(quint32 f) { m_features = f; }
     bool speaks(Feature f) const { return (m_features & quint32(f)) != 0; }
+
+    // Получатель пришёл с промежуточным манифестом и ждёт хеши
+    // сегментами. Не то же самое, что «умеет»: новый клиент, открывший
+    // раздачу уже после того, как хеши досчитаны, получил весь список
+    // по HTTP и в сегментах не нуждается.
+    bool wantsHashStream() const { return m_wantsHashStream; }
+    void setWantsHashStream(bool on) { m_wantsHashStream = on; }
 
     // Карта того, что у получателя есть. В M1 хватало префикса (чанки
     // приходили по порядку), с двумя волнами — уже нет: у получателя
@@ -176,6 +184,7 @@ private:
     quint64 m_cursor = 0;
     quint64 m_acked = 0;
     quint32 m_features = 0;
+    bool m_wantsHashStream = false;
     int m_backfillStrikes = 0;
     quint64 m_fromWindow = 0;
     quint64 m_fromPeers = 0;

@@ -51,7 +51,7 @@ bool writeAll(TlsSocket &socket, const std::string &data, int timeoutMs, std::st
 
 bool httpRequest(const HttpTarget &target, const std::string &method, const std::string &path,
                  const std::string &requestBody, HttpResponse &out, std::string *err,
-                 int timeoutMs)
+                 int timeoutMs, const std::string &extraHeaders)
 {
     TlsSocket socket;
     if (!socket.connectTo(target.host, target.port, target.tls, target.insecure, timeoutMs, err))
@@ -67,6 +67,8 @@ bool httpRequest(const HttpTarget &target, const std::string &method, const std:
     // Соединение на один запрос: keep-alive сэкономил бы рукопожатие, но
     // запросов у нас три штуки за раздачу, а состояния он добавляет много.
     request += "Connection: close\r\n";
+    // Заголовки, которых просит вызывающий, — уже с \r\n на каждом.
+    request += extraHeaders;
     request += "Content-Length: " + std::to_string(requestBody.size()) + "\r\n";
     request += "\r\n";
     request += requestBody;

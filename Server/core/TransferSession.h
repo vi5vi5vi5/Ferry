@@ -61,7 +61,23 @@ public:
     bool applyOffer(const QJsonObject &msg, QString *errorCode);
 
     // Метаданные для GET /api/transfers/<id>. Ничего не сжигает.
-    QJsonObject metaJson(qint64 nowMs) const;
+    // streamClient — клиент прислал заголовок X-Ferry-Features со строкой
+    // stream_hashes. Пока хеши не досчитаны, ему отдаётся промежуточный
+    // манифест без списка, а всем остальным отдать нечего (см. preparing()).
+    QJsonObject metaJson(qint64 nowMs, bool streamClient = false) const;
+
+    // Хеши на лету: отправитель ещё считает, и клиенту, который не умеет
+    // принимать их сегментами, показать пока нечего.
+    bool streamingHashes() const { return m_streamHashes && !m_hashesComplete; }
+
+    // Сегмент списка хешей и конец списка — от отправителя.
+    bool onHashes(const QJsonObject &msg, QString *errorCode);
+    bool onHashesDone(const QJsonObject &msg, QString *errorCode);
+
+    // Всё, что накоплено, — только что подключившемуся получателю,
+    // ДО первого фрейма. Порядок в сокете тот же, что порядок отправки,
+    // так что хеш чанка всегда приезжает раньше самого чанка.
+    void sendHashesSoFar(ClientSession *receiver);
 
     // ---- участники ----
     void attachSender(ClientSession *sender);
@@ -208,6 +224,17 @@ private:
     QByteArray m_noncePrefix;
     QByteArray m_encryptedManifest;
     QByteArray m_encryptedHashList;
+
+    // ---- хеши на лету ----
+    // Промежуточный манифест (без корня) и сегменты списка встык. Когда
+    // отправитель досчитает, m_encryptedManifest и m_encryptedHashList
+    // получают итоговые — ровно в том виде, в каком их ждут все.
+    bool m_streamHashes = false;
+    bool m_hashesComplete = true;
+    QByteArray m_encryptedStreamManifest;
+    quint64 m_hashedUpTo = 0;
+    QList<QJsonObject> m_hashSegments;   // уже готовые сообщения hashes
+    QJsonObject m_hashesDoneMsg;
     QString m_mode = QStringLiteral("key");
 
     quint64 m_totalBytes = 0;

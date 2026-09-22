@@ -497,6 +497,98 @@ void testManifest()
     check(ferry::Manifest::fromJson(tree.toJson(), back, &err), "дерево разбирается: " + err);
     tree.total = 101;
     check(!ferry::Manifest::fromJson(tree.toJson(), back, &err), "расхождение суммы отвергнуто");
+
+    // Промежуточный манифест раздачи с хешами на лету: корня в нём нет.
+    ferry::Manifest early = m;
+    early.streamHashes = true;
+    const std::string earlyJson = early.toJson();
+    check(earlyJson.find("\"root\"") == std::string::npos, "в промежуточном манифесте нет корня");
+    check(ferry::Manifest::fromJson(earlyJson, back, &err) && back.streamHashes,
+          "промежуточный манифест разбирается: " + err);
+    check(back.name == m.name && back.total == m.total, "имя и размер пережили разбор");
+
+    // Строгость в обе стороны: обычный манифест без корня — сломан, а
+    // промежуточный с корнем — чужой.
+    std::string noRoot = m.toJson();
+    const size_t at = noRoot.find(",\"root\"");
+    noRoot.erase(at, noRoot.find('"', noRoot.find(':', at) + 2) + 1 - at);
+    check(!ferry::Manifest::fromJson(noRoot, back, &err), "обычный манифест без корня отвергнут");
+    std::string both = earlyJson;
+    both.insert(both.size() - 1, ",\"root\":\"" + std::string(43, 'A') + "\"");
+    check(!ferry::Manifest::fromJson(both, back, &err),
+          "промежуточный манифест с корнем отвергнут");
+    std::string strange = earlyJson;
+    strange.replace(strange.find("\"stream\""), 8, "\"later\"");
+    check(!ferry::Manifest::fromJson(strange, back, &err),
+          "незнакомый способ доставки хешей отвергнут");
+}
+
+void testHashSegments()
+{
+    section("Хеши на лету");
+    bool ok = false;
+    const ferry::TransferKeys keys = ferry::TransferKeys::derive(ferry::randomKey32(&ok));
+    const uint8_t noncePrefix[4] = {1, 2, 3, 4};
+    const uint64_t chunks = 20000;
+
+    // Метки не пересекаются ни друг с другом, ни с сегментами.
+    check(ferry::kMetaLabelStreamManifest != ferry::kMetaLabelManifest
+              && ferry::kMetaLabelStreamManifest != ferry::kMetaLabelHashList,
+          "у промежуточного манифеста своя метка");
+    check(ferry::hashSegmentLabel(chunks) < ferry::kMetaLabelStreamManifest,
+          "метки сегментов не достают до меток манифестов");
+
+    // Один и тот же текст под двумя метками — два разных шифротекста:
+    // nonce разные, и повтора nonce в GCM нет.
+    const std::string text = "{\"same\":true}";
+    const auto *p = reinterpret_cast<const uint8_t *>(text.data());
+    ferry::Bytes a, b;
+    ferry::sealChunk(keys.meta, noncePrefix, ferry::kMetaLabelStreamManifest, chunks, p,
+                     text.size(), a);
+    ferry::sealChunk(keys.meta, noncePrefix, ferry::kMetaLabelManifest, chunks, p, text.size(), b);
+    check(a != b, "промежуточный и итоговый манифест шифруются под разными nonce");
+
+    // Список, собранный из сегментов, — тот же, что посчитанный целиком.
+    ferry::HashList full;
+    for (uint64_t i = 0; i < 300; ++i) {
+        const uint64_t v = i * 2654435761ull;
+        full.append(ferry::blake3(reinterpret_cast<const uint8_t *>(&v), sizeof(v)));
+    }
+    const std::vector<uint8_t> raw = full.serialize();
+
+    ferry::HashList assembled;
+    uint64_t from = 0;
+    bool allOpened = true;
+    for (const uint64_t len : {1ull, 128ull, 171ull}) {
+        ferry::Bytes sealed, opened;
+        ferry::sealChunk(keys.meta, noncePrefix, ferry::hashSegmentLabel(from), 300,
+                         raw.data() + from * 32, size_t(len * 32), sealed);
+        allOpened = allOpened
+                    && ferry::openChunk(keys.meta, noncePrefix, ferry::hashSegmentLabel(from), 300,
+                                        sealed.data(), sealed.size(), opened);
+        ferry::HashList part;
+        allOpened = allOpened && ferry::HashList::parse(opened, len, part);
+        for (size_t i = 0; i < part.size(); ++i)
+            assembled.append(part.at(i));
+
+        // Сегмент, выданный за начинающийся с другого места, не откроется:
+        // метка входит в nonce, и переставить сегменты нельзя.
+        if (from > 0)
+            check(!ferry::openChunk(keys.meta, noncePrefix, ferry::hashSegmentLabel(from - 1), 300,
+                                    sealed.data(), sealed.size(), opened),
+                  "сегмент не открывается под чужим началом");
+        from += len;
+    }
+    check(allOpened, "все сегменты открылись");
+    check(assembled.size() == full.size() && assembled.root() == full.root(),
+          "список из сегментов совпал с посчитанным целиком");
+
+    // Проверить можно только то, чей хеш уже приехал.
+    ferry::HashList partial;
+    partial.append(full.at(0));
+    const uint64_t v1 = 1 * 2654435761ull;
+    check(!partial.verify(1, reinterpret_cast<const uint8_t *>(&v1), sizeof(v1)),
+          "чанк без приехавшего хеша не проходит проверку");
 }
 
 void testLink()
@@ -639,6 +731,7 @@ int main()
     testCrypto();
     testJson();
     testManifest();
+    testHashSegments();
     testLink();
     testEndToEnd();
 

@@ -116,7 +116,23 @@ public:
 
     // Пытается поднять карту с диска. false — карты нет или она от другого
     // тома (тогда вызывающий начинает с нуля).
-    bool load()
+    bool load() { return loadImpl(true, nullptr); }
+
+    // То же, но без сверки корня. Форма тома совпала, а корень сравнить не
+    // с чем: у раздачи с хешами на лету его ещё нет, а у недокачки,
+    // начатой при такой раздаче и не дожившей до конца подсчёта, он в
+    // карте нулевой. Такой карте на слово не верят — каждый её чанк потом
+    // сверяется с хешем заново.
+    bool loadIgnoringRoot(Hash32 *storedRoot) { return loadImpl(false, storedRoot); }
+
+    // Корень стал известен (хеши досчитаны) — он пойдёт в карту при
+    // следующей записи, и докачка после этого снова сможет верить карте.
+    void setRoot(const Hash32 &root) { m_root = root; }
+
+    void clearAll() { m_set.reset(m_count); }
+
+private:
+    bool loadImpl(bool checkRoot, Hash32 *storedRoot)
     {
         const platform::File fd = platform::fileOpenRead(m_path);
         if (fd == platform::kInvalidFile)
@@ -143,10 +159,12 @@ public:
         // тому. Совпало имя файла, но не совпал корень — значит рядом
         // лежит недокачка чего-то другого, и мешать их нельзя.
         if (version != 1 || chunkSize != m_chunkSize || count != m_count || total != m_total
-            || std::memcmp(head + 32, m_root.data(), 32) != 0) {
+            || (checkRoot && std::memcmp(head + 32, m_root.data(), 32) != 0)) {
             platform::fileClose(fd);
             return false;
         }
+        if (storedRoot)
+            std::memcpy(storedRoot->data(), head + 32, 32);
 
         std::vector<uint8_t> raw(m_set.byteCount());
         const int64_t bits = platform::fileReadAt(fd, raw.data(), raw.size(), sizeof(head));
@@ -154,6 +172,7 @@ public:
         return bits == int64_t(raw.size()) && m_set.loadBits(raw.data(), raw.size());
     }
 
+public:
     bool has(uint64_t index) const { return m_set.has(index); }
     void set(uint64_t index) { m_set.set(index); }
 
@@ -167,7 +186,11 @@ public:
     // диапазоны, а не одно число.
     const ferry::ChunkSet &set() const { return m_set; }
 
-    bool flush() const
+    // extra — чанки, которые лежат на диске, но ещё не сверены с хешами.
+    // В памяти их нет (для всего клиента их как бы нет), а на диск они
+    // пишутся: иначе обрыв до сверки выбросил бы их из карты, и в следующий
+    // раз их пришлось бы качать заново.
+    bool flush(const ferry::ChunkSet *extra = nullptr) const
     {
         const platform::File fd = platform::fileOpenReadWrite(m_path);
         if (fd == platform::kInvalidFile)
@@ -186,7 +209,12 @@ public:
             head[24 + i] = uint8_t(m_total >> (56 - 8 * i));
         std::memcpy(head + 32, m_root.data(), 32);
 
-        const std::vector<uint8_t> &raw = m_set.bits();
+        std::vector<uint8_t> raw = m_set.bits();
+        if (extra) {
+            const std::vector<uint8_t> &more = extra->bits();
+            for (size_t i = 0; i < raw.size() && i < more.size(); ++i)
+                raw[i] |= more[i];
+        }
         bool okWrite = platform::fileWriteAt(fd, head, sizeof(head), 0) == int64_t(sizeof(head));
         okWrite = okWrite
                   && platform::fileWriteAt(fd, raw.data(), raw.size(), sizeof(head))
@@ -369,8 +397,13 @@ int runGet(const Options &options)
 
     const TransferKeys keys = TransferKeys::derive(link.key);
 
+    // Раздача с хешами на лету, где отправитель ещё считает: манифест
+    // промежуточный и лежит под своей меткой, списка пока нет — он приедет
+    // сегментами по WebSocket.
+    const uint64_t manifestLabel =
+        meta.streamHashes ? kMetaLabelStreamManifest : kMetaLabelManifest;
     Bytes manifestPlain;
-    if (!openChunk(keys.meta, meta.noncePrefix.data(), kMetaLabelManifest, plan.chunkCount,
+    if (!openChunk(keys.meta, meta.noncePrefix.data(), manifestLabel, plan.chunkCount,
                    meta.manifest.data(), meta.manifest.size(), manifestPlain)) {
         std::fprintf(stderr,
                      "Манифест не расшифровался.\n"
@@ -389,25 +422,35 @@ int runGet(const Options &options)
         std::fprintf(stderr, "Размер в манифесте не сходится с размером раздачи.\n");
         return 1;
     }
-    Bytes hashesPlain;
-    if (!openChunk(keys.meta, meta.noncePrefix.data(), kMetaLabelHashList, plan.chunkCount,
-                   meta.hashList.data(), meta.hashList.size(), hashesPlain)) {
-        std::fprintf(stderr, "Список хешей не расшифровался.\n");
+    // Сервер сказал «хеши на лету», а манифест говорит обратное (или
+    // наоборот) — это чужой или подменённый манифест.
+    if (manifest.streamHashes != meta.streamHashes) {
+        std::fprintf(stderr, "Манифест не той формы, какую описал сервер, — том не принимаем.\n");
         return 1;
     }
 
+    // Список хешей. При хешах на лету он растёт по мере прихода сегментов,
+    // и проверить можно только тот чанк, чей хеш уже приехал.
     HashList hashes;
-    if (!HashList::parse(hashesPlain, plan.chunkCount, hashes)) {
-        std::fprintf(stderr, "Список хешей не той длины.\n");
-        return 1;
-    }
-    // Корень лежит в манифесте, а не в ссылке — иначе сервер видел бы
-    // content-id и сопоставлял бы разные раздачи одного файла. Пока корень
-    // не сошёлся, списку хешей верить нельзя, а без него нельзя проверить
-    // ни одного чанка.
-    if (hashes.root() != manifest.root) {
-        std::fprintf(stderr, "Корневой хеш не сошёлся со списком хешей — том не принимаем.\n");
-        return 1;
+    if (!meta.streamHashes) {
+        Bytes hashesPlain;
+        if (!openChunk(keys.meta, meta.noncePrefix.data(), kMetaLabelHashList, plan.chunkCount,
+                       meta.hashList.data(), meta.hashList.size(), hashesPlain)) {
+            std::fprintf(stderr, "Список хешей не расшифровался.\n");
+            return 1;
+        }
+        if (!HashList::parse(hashesPlain, plan.chunkCount, hashes)) {
+            std::fprintf(stderr, "Список хешей не той длины.\n");
+            return 1;
+        }
+        // Корень лежит в манифесте, а не в ссылке — иначе сервер видел бы
+        // content-id и сопоставлял бы разные раздачи одного файла. Пока корень
+        // не сошёлся, списку хешей верить нельзя, а без него нельзя проверить
+        // ни одного чанка.
+        if (hashes.root() != manifest.root) {
+            std::fprintf(stderr, "Корневой хеш не сошёлся со списком хешей — том не принимаем.\n");
+            return 1;
+        }
     }
 
     // ---- 3. Что это и куда класть ----
@@ -484,7 +527,30 @@ int runGet(const Options &options)
     // ---- 4. Том на диске и карта принятого ----
     ChunkMap map;
     map.init(mapPath, plan.chunkCount, plan.chunkSize, plan.totalBytes, manifest.root);
-    const bool resuming = map.load() && platform::fileExists(partPath);
+
+    // Недокачка, которой нельзя верить на слово: форма тома та же, а корень
+    // сверить не с чем. Её чанки перечитываются с диска и сверяются с
+    // хешами по мере их прихода; до этого для остального клиента их как бы
+    // нет — о них не говорят серверу и их не отдают другим.
+    ChunkSet localPending(plan.chunkCount);
+    Hash32 storedRoot{};
+    bool resuming = false;
+    if (platform::fileExists(partPath)) {
+        if (!meta.streamHashes && map.load()) {
+            resuming = true;
+        } else {
+            map.init(mapPath, plan.chunkCount, plan.chunkSize, plan.totalBytes, manifest.root);
+            // Чужую недокачку (другой корень) по-прежнему выбрасываем. Сверять
+            // стоит, только когда корень сравнить не с чем: хеши ещё едут, или
+            // сама недокачка осталась от такой раздачи и корня не узнала.
+            if (map.loadIgnoringRoot(&storedRoot)
+                && (meta.streamHashes || storedRoot == Hash32{})) {
+                localPending = map.set();
+                map.clearAll();
+                resuming = true;
+            }
+        }
+    }
     if (!resuming) {
         map.init(mapPath, plan.chunkCount, plan.chunkSize, plan.totalBytes, manifest.root);
         // Недокачки прошлого раза может не быть, а может быть чужая — в
@@ -514,9 +580,14 @@ int runGet(const Options &options)
     // секунды оставлял бы на диске недокачку БЕЗ карты — файл есть, а
     // понять, что в нём настоящее, нечем, и при следующем запуске всё
     // начиналось бы с нуля. Дальше она обновляется раз в пару секунд.
-    map.flush();
+    map.flush(&localPending);
 
     uint64_t have = map.haveCount();
+    if (resuming && !localPending.empty()) {
+        std::printf("%sпродолжаем: на диске уже %s из %s — сверю их с хешами и докачаю остальное%s\n",
+                    ok(), count(localPending.cardinality()).c_str(),
+                    count(plan.chunkCount).c_str(), reset());
+    }
     if (resuming && have > 0) {
         std::printf("%sпродолжаем: уже принято %s из %s (%s)%s\n", ok(), count(have).c_str(),
                     count(plan.chunkCount).c_str(),
@@ -570,7 +641,13 @@ int runGet(const Options &options)
         // пришлёт serve ни разу — и правильно сделает: ждать чанков
         // от того, кто их не пришлёт, значит повесить чужой догон.
         features.push(json::Value::make("backfill"));
+        // Принимаем хеши сегментами. И просим их, если пришли с
+        // промежуточным манифестом: без этого слова релей не пустит нас,
+        // пока отправитель не досчитает.
+        features.push(json::Value::make(kFeatureStreamHashes));
         hello.set("features", std::move(features));
+        if (meta.streamHashes)
+            hello.set("hashes", json::Value::make("stream"));
         ws.sendText(hello.dump());
     }
 
@@ -614,6 +691,11 @@ int runGet(const Options &options)
                 std::fprintf(stderr, "%s\n", explainError(v["reason"].toString()).c_str());
                 volume.close();
                 return 1;
+            } else {
+                // Сегменты хешей идут сразу за hello_ok, одной пачкой с ним.
+                // Выбросить их здесь значило бы остаться без хешей и встать
+                // на первом же чанке.
+                deferred.push_back(std::move(msg));
             }
         }
     }
@@ -668,6 +750,11 @@ int runGet(const Options &options)
     std::string sourceLine;
 
     uint64_t received = have;
+
+    // Хеши на лету: пока отправитель не досчитал и корень не сверен, приём
+    // не закончен, даже если все чанки уже на месте.
+    bool hashesComplete = !meta.streamHashes;
+    std::vector<uint8_t> verifyBuf;
     uint64_t ackedUpTo = map.havePrefix();
     uint64_t sentHaveCount = map.set().cardinality();
     int64_t lastFlushMs = nowMs();
@@ -676,7 +763,7 @@ int runGet(const Options &options)
     bool failed = false;
     std::string failure;
 
-    while (!stopRequested() && received < plan.chunkCount) {
+    while (!stopRequested() && (received < plan.chunkCount || !hashesComplete)) {
         if (!ws.pump(100)) {
             failed = true;
             const std::string reason = drainErrorReason(ws);
@@ -710,6 +797,77 @@ int runGet(const Options &options)
                         sourceLine = std::string("источник окно ") + percent(w)
                                      + "   пиры " + percent(p) + "   отправитель "
                                      + percent(snd);
+                    }
+                } else if (type == "hashes") {
+                    // Сегмент списка: встык к уже известным, под K_meta и с
+                    // меткой от своего начала — переставить или подсунуть
+                    // чужой сегмент нельзя.
+                    const int64_t from = v["from"].toInt(-1);
+                    const int64_t n = v["count"].toInt(-1);
+                    Bytes sealed, opened;
+                    HashList part;
+                    if (!meta.streamHashes || hashesComplete || from != int64_t(hashes.size())
+                        || n < 1 || n > int64_t(kHashSegmentMax)
+                        || uint64_t(from + n) > plan.chunkCount
+                        || !base64UrlDecode(v["data"].toString(), sealed)
+                        || !openChunk(keys.meta, meta.noncePrefix.data(),
+                                      hashSegmentLabel(uint64_t(from)), plan.chunkCount,
+                                      sealed.data(), sealed.size(), opened)
+                        || !HashList::parse(opened, uint64_t(n), part)) {
+                        failed = true;
+                        failure = "сегмент списка хешей не сошёлся — том не принимаем";
+                        break;
+                    }
+                    for (size_t k = 0; k < part.size(); ++k)
+                        hashes.append(part.at(k));
+                } else if (type == "hashes_done") {
+                    // Отправитель досчитал. Итоговый манифест — тот же том,
+                    // но с корнем, и корень обязан сойтись с тем, что мы
+                    // собрали из сегментов.
+                    Bytes sealed, opened;
+                    Manifest finalManifest;
+                    std::string why;
+                    bool good = meta.streamHashes && !hashesComplete
+                                && hashes.size() == plan.chunkCount
+                                && base64UrlDecode(v["manifest"].toString(), sealed)
+                                && openChunk(keys.meta, meta.noncePrefix.data(),
+                                             kMetaLabelManifest, plan.chunkCount, sealed.data(),
+                                             sealed.size(), opened)
+                                && Manifest::fromJson(std::string(opened.begin(), opened.end()),
+                                                      finalManifest, &why)
+                                && !finalManifest.streamHashes
+                                && finalManifest.root == hashes.root();
+                    if (good) {
+                        // И описывает он ровно тот том, что мы принимаем:
+                        // без корня оба манифеста обязаны совпасть до байта.
+                        Manifest same = finalManifest;
+                        same.streamHashes = true;
+                        same.root = Hash32{};
+                        good = same.toJson() == manifest.toJson();
+                    }
+                    if (!good) {
+                        failed = true;
+                        failure = "корень не сошёлся со списком хешей — том не принимаем";
+                        break;
+                    }
+                    manifest.root = finalManifest.root;
+                    map.setRoot(finalManifest.root);
+                    hashesComplete = true;
+
+                    // Недокачка от этого же тома, досчитанного когда-то
+                    // раньше: корни совпали — значит карте можно верить
+                    // целиком, и перечитывать с диска остаток незачем.
+                    if (!localPending.empty() && storedRoot != Hash32{}
+                        && storedRoot == finalManifest.root) {
+                        for (uint64_t i = localPending.firstPresent(0); i < plan.chunkCount;
+                             i = localPending.firstPresent(i + 1)) {
+                            if (!map.has(i)) {
+                                map.set(i);
+                                segments[size_t(i)] = Seg::Have;
+                                ++received;
+                            }
+                        }
+                        localPending.reset(plan.chunkCount);
                     }
                 } else if (type == "serve") {
                     // Сервер просит отдать чанки обратно — их ждёт
@@ -806,6 +964,8 @@ int runGet(const Options &options)
             }
 
             map.set(index);
+            // Приехал по сети — сверять его копию с диска уже незачем.
+            localPending.clear(index);
 
             // Какой волной приехал чанк. Получателю этого никто не говорит и
             // говорить не должен: фрейм из окна и фрейм от пира одинаковы
@@ -824,6 +984,30 @@ int runGet(const Options &options)
         }
         if (failed)
             break;
+
+        // Сверка недокачки, которой нельзя было верить на слово. По чанку за
+        // раз, но не дольше 30 мс за оборот: сеть не должна стоять, пока мы
+        // перечитываем свой же диск. Хеши приходят по порядку, и сверять
+        // можно только то, чей хеш уже есть.
+        if (!localPending.empty()) {
+            const int64_t until = nowMs() + 30;
+            while (nowMs() < until) {
+                const uint64_t i = localPending.firstPresent(0);
+                if (i >= plan.chunkCount || i >= hashes.size())
+                    break;
+                localPending.clear(i);
+                const uint32_t len = plan.sizeOf(i);
+                verifyBuf.resize(len);
+                if (volume.readAt(verifyBuf.data(), len, plan.offsetOf(i)) == int64_t(len)
+                    && hashes.verify(i, verifyBuf.data(), len)) {
+                    map.set(i);
+                    segments[size_t(i)] = Seg::Have;
+                    ++received;
+                }
+                // Не сошёлся — значит его просто нет: он приедет по сети,
+                // как любой другой недостающий.
+            }
+        }
 
         // Отдаём то, что у нас попросили. По одному чанку за раз и с
         // оглядкой на свою же очередь отправки: мы здесь в первую очередь
@@ -855,7 +1039,7 @@ int runGet(const Options &options)
         // клиента убьют не по-хорошему, а на быстром канале за две
         // секунды успевает приехать пара сотен мегабайт.
         if (t - lastFlushMs > 500) {
-            map.flush();
+            map.flush(&localPending);
             lastFlushMs = t;
         }
 
@@ -910,7 +1094,7 @@ int runGet(const Options &options)
     }
 
     panel.finish();
-    map.flush();
+    map.flush(&localPending);
 
     // Последний have — обязательно, и не ради красоты.
     //

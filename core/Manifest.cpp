@@ -155,7 +155,13 @@ std::string Manifest::toJson() const
     o.set("kind", json::Value::make(kind));
     o.set("name", json::Value::make(name));
     o.set("total", json::Value::make(static_cast<int64_t>(total)));
-    o.set("root", json::Value::make(base64UrlEncode(root.data(), root.size())));
+    // У промежуточного манифеста корня нет и быть не может: хеши ещё
+    // считаются. Вписать туда нули значило бы соврать — получатель
+    // сверил бы с ними список и отверг том.
+    if (streamHashes)
+        o.set("hashes", json::Value::make("stream"));
+    else
+        o.set("root", json::Value::make(base64UrlEncode(root.data(), root.size())));
 
     if (isTree()) {
         json::Value arr = json::Value::array();
@@ -210,10 +216,22 @@ bool Manifest::fromJson(const std::string &text, Manifest &out, std::string *err
         return bad("размер тома отсутствует или отрицателен");
     m.total = static_cast<uint64_t>(total);
 
-    std::vector<uint8_t> rootHash;
-    if (!base64UrlDecode(root["root"].toString(), rootHash) || rootHash.size() != 32)
-        return bad("корневой хеш отсутствует или не той длины");
-    std::memcpy(m.root.data(), rootHash.data(), 32);
+    // Промежуточный манифест раздачи с хешами на лету: корня в нём нет, и
+    // присутствие поля root здесь — признак чужого или сломанного
+    // манифеста, а не «ну и ладно».
+    const std::string hashesMode = root["hashes"].toString();
+    if (!hashesMode.empty() && hashesMode != "stream")
+        return bad("незнакомый способ доставки хешей");
+    m.streamHashes = hashesMode == "stream";
+    if (m.streamHashes) {
+        if (!root["root"].isNull())
+            return bad("у манифеста с хешами на лету не бывает корня");
+    } else {
+        std::vector<uint8_t> rootHash;
+        if (!base64UrlDecode(root["root"].toString(), rootHash) || rootHash.size() != 32)
+            return bad("корневой хеш отсутствует или не той длины");
+        std::memcpy(m.root.data(), rootHash.data(), 32);
+    }
 
     if (m.isTree()) {
         const json::Value &arr = root["entries"];

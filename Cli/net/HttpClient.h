@@ -29,6 +29,6 @@ struct HttpTarget
 
 bool httpRequest(const HttpTarget &target, const std::string &method, const std::string &path,
                  const std::string &requestBody, HttpResponse &out, std::string *err,
-                 int timeoutMs = 20000);
+                 int timeoutMs = 20000, const std::string &extraHeaders = std::string());
 
 } // namespace ferry::net

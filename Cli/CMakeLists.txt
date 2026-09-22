@@ -20,6 +20,7 @@ target_include_directories(ferry-qrcodegen PUBLIC
 add_executable(ferry
     main.cpp
     ChunkPump.h   ChunkPump.cpp
+    Hasher.h      Hasher.cpp
     Tree.h        Tree.cpp
     VolumeFile.h  VolumeFile.cpp
     Uninstall.h   Uninstall.cpp
@@ -30,6 +31,7 @@ add_executable(ferry
     Signals.h     Signals.cpp
 
     platform/Platform.h
+    platform/Threads.h
     platform/Platform_posix.cpp
     platform/Platform_windows.cpp
 
@@ -78,6 +80,14 @@ target_compile_definitions(ferry PRIVATE
 # пакета безопасности до бинаря уже не дойдёт.
 if(NOT MSVC)
     target_link_options(ferry PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
+# Фоновый подсчёт хешей (Hasher) живёт в потоках. На POSIX это std::thread,
+# и без явной библиотеки потоков сборка на glibc старше 2.34 падала бы на
+# линковке. На Windows потоки свои (platform/Threads.h) и ничего не нужно.
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(ferry PRIVATE Threads::Threads)
 endif()
 
 if(FERRY_STATIC_OPENSSL AND NOT MSVC)

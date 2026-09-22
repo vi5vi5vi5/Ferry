@@ -40,6 +40,7 @@ cd "$SERVER_DIR"
 
 FORCE=0
 JOBS_RESET=0
+STANDALONE_RESET=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --force|-f)   FORCE=1; shift ;;
@@ -54,7 +55,7 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             export FERRY_PROXY_NETWORK="$2"; shift 2 ;;
-        --standalone) export FERRY_PROXY_NETWORK=""; shift ;;
+        --standalone) STANDALONE_RESET=1; export FERRY_PROXY_NETWORK=""; shift ;;
         --jobs|-j)
             case "${2:-}" in
                 ''|*[!0-9]*)
@@ -113,6 +114,14 @@ if [[ "$JOBS_RESET" == "1" ]]; then
     echo "Число компиляций разом больше не ограничено."
 fi
 
+# То же самое с --standalone, и здесь это стоило дороже: однажды
+# запомненная сеть соседа возвращалась при каждом запуске, и уйти из-за
+# чужого nginx обратно на свой прокси было нельзя никаким флагом.
+if [[ "$STANDALONE_RESET" == "1" && -z "${FERRY_PROXY_NETWORK:-}" ]]; then
+    env_file_unset FERRY_PROXY_NETWORK
+    unset FERRY_PROXY_NETWORK
+fi
+
 for var in DOMAIN LETSENCRYPT_EMAIL HTTP_PORT HTTPS_PORT FERRY_PROXY_NETWORK WINDOWS_STAGE BUILD_JOBS; do
     if [[ -n "${!var:-}" ]]; then
         env_file_set "$var" "${!var}"
@@ -149,12 +158,21 @@ if [[ -n "${FERRY_PROXY_NETWORK:-}" ]]; then
     env_file_set COMPOSE_FILE "docker-compose.yml:docker-compose.behind-proxy.yml"
     env_file_set COMPOSE_PROFILES ""
     export COMPOSE_PROFILES=""
+    # За чужим nginx своих портов наружу нет — и проверять нечего.
+    PORTS_TO_CHECK=()
 else
     BEHIND_PROXY=0
     COMPOSE_ARGS=(-f docker-compose.yml)
     env_file_set COMPOSE_FILE "docker-compose.yml"
     env_file_set COMPOSE_PROFILES "standalone"
     export COMPOSE_PROFILES="standalone"
+    # Ровно те порты, что публикует proxy в docker-compose.yml.
+    #
+    # Задать этот список когда-то забыли, и без него проверка ниже молча
+    # крутилась по пустому массиву: ${X[@]+...} написан ровно так, чтобы
+    # set -u не ругался на незаданный массив. Вместо подсказки человек
+    # получал сырое «Bind for 0.0.0.0:80 failed» из недр docker.
+    PORTS_TO_CHECK=("http:${HTTP_PORT:-80}" "https:${HTTPS_PORT:-443}")
 fi
 
 if [[ "$BEHIND_PROXY" -eq 1 ]]; then
@@ -253,6 +271,7 @@ port_owner() {
 
 OUR_CONTAINERS="$(docker compose ps -q 2>/dev/null | tr '\n' ' ' || true)"
 CONFLICT=0
+CONFLICT_OWNER=""
 for spec in ${PORTS_TO_CHECK[@]+"${PORTS_TO_CHECK[@]}"}; do
     label="${spec%%:*}"
     port="${spec##*:}"
@@ -262,12 +281,22 @@ for spec in ${PORTS_TO_CHECK[@]+"${PORTS_TO_CHECK[@]}"}; do
         echo "Порт $port ($label) уже занят каким-то процессом на этом сервере." >&2
     else
         echo "Порт $port ($label) уже занят контейнером ${owner}." >&2
+        [[ -z "$CONFLICT_OWNER" ]] && CONFLICT_OWNER="$owner"
     fi
     CONFLICT=1
 done
 
 if [[ "$CONFLICT" -eq 1 ]]; then
-    cat >&2 <<'HINT'
+    # В какой сети живёт тот, кто занял порт. Именно её надо передать в
+    # --behind-proxy, и угадывать её — лишний раз ошибиться: имя составляется
+    # из имени проекта compose и на разных серверах бывает разным.
+    NEIGHBOR_NET=""
+    if [[ -n "$CONFLICT_OWNER" ]]; then
+        NEIGHBOR_NET="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$CONFLICT_OWNER" 2>/dev/null \
+            | tr ' ' '\n' | grep -vE '^(bridge|host|none)?$' | head -n 1 || true)"
+    fi
+    NEIGHBOR_HINT="${NEIGHBOR_NET:-server_default}"
+    cat >&2 <<HINT
 
 Так бывает, когда на сервере уже живёт другой сервис — например MeetUp.
 Есть два выхода.
@@ -275,7 +304,7 @@ if [[ "$CONFLICT" -eq 1 ]]; then
 1. Встать ЗА его nginx — тогда у Ferry будет свой домен без порта в
    ссылке и настоящий сертификат:
 
-     ./tools/update.sh --force --behind-proxy server_default
+     ./tools/update.sh --force --behind-proxy ${NEIGHBOR_HINT}
 
    Соседу при этом кладётся готовый server-блок; как именно — напишем
    после запуска.
@@ -342,6 +371,16 @@ echo "Повторные — быстрые, тяжёлые стадии бер�
 # те контейнеры, которые поменялись. Первая сборка занимает несколько
 # минут: собирается сервер на Qt, ядро и клиент.
 docker compose "${COMPOSE_ARGS[@]}" up -d --build
+
+# За чужим nginx собственный прокси не нужен, но сам он никуда не денется:
+# сервис proxy в compose-файле есть, просто под профилем standalone, и
+# сиротой для --remove-orphans не считается. Так на сервере остаётся
+# висеть контейнер от прошлого запуска — либо живой и держащий 80 и 443
+# (если раньше жили сами по себе), либо мёртвый, так и не поднявшийся на
+# занятых портах. Убираем только его и только в этом режиме.
+if [[ "$BEHIND_PROXY" -eq 1 ]]; then
+    docker compose -f docker-compose.yml --profile standalone rm -sf proxy >/dev/null 2>&1 || true
+fi
 
 echo
 echo "=== 3/3 Проверка ==="

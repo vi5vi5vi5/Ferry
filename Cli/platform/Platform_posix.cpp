@@ -1,4 +1,5 @@
 #include "Cli/platform/Platform.h"
+#include "Cli/platform/Threads.h"
 
 #ifndef _WIN32
 
@@ -16,6 +17,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 namespace ferry::platform {
@@ -426,6 +428,25 @@ bool removeSelf(const std::string &exePath, bool *deferred)
     if (deferred)
         *deferred = false;
     return ::unlink(exePath.c_str()) == 0;
+}
+
+// ---- Потоки (Threads.h): остальное — в заголовке, поверх std:: ----
+
+unsigned cpuCount()
+{
+    const long n = ::sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? unsigned(n) : 1u;
+}
+
+void sleepMs(int ms)
+{
+    if (ms <= 0)
+        return;
+    timespec ts{};
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = long(ms % 1000) * 1000000L;
+    while (::nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
 }
 
 } // namespace ferry::platform

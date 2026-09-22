@@ -51,7 +51,7 @@ public:
 
 private:
     void handleCreate(const HttpRequest &req, const Responder &respond);
-    void handleMeta(const QByteArray &id, const Responder &respond);
+    void handleMeta(const QByteArray &id, bool streamClient, const Responder &respond);
     void handleChallenge(const QByteArray &id, const Responder &respond);
     void handleHealth(const Responder &respond);
 

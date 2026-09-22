@@ -47,6 +47,42 @@ inline constexpr const char *kInfoVerifier = "ferry/v1/verifier";
 inline constexpr uint64_t kMetaLabelManifest = 0xFFFFFFFFFFFFFFFFull;
 inline constexpr uint64_t kMetaLabelHashList = 0xFFFFFFFFFFFFFFFEull;
 
+// ---- Хеши на лету ----
+//
+// Отправитель не читает том целиком до ссылки: хеши считаются в фоне и
+// уходят сегментами, а раздача начинается сразу. Для этого нужны ещё две
+// метки, и ни одна из них не имеет права совпасть с уже занятыми.
+//
+// Промежуточный манифест (без корня — корня ещё нет) и итоговый (с корнем)
+// — разные открытые тексты. Зашифровать их под одним nonce значило бы
+// повторить nonce в GCM, а это раскрывает и поток ключа, и ключ
+// аутентификации. Поэтому промежуточный идёт под своей меткой, а
+// kMetaLabelManifest и kMetaLabelHashList достаются итоговым — ровно в
+// том виде, в каком их ждут клиенты, не знающие про хеши на лету.
+inline constexpr uint64_t kMetaLabelStreamManifest = 0xFFFFFFFFFFFFFFFDull;
+
+// Сегмент списка хешей, начинающийся с чанка from, шифруется под меткой
+// база + from. Сегменты идут встык и не пересекаются, так что метки
+// уникальны; до 0xFF… база не дотянется ни при каком реальном томе
+// (для этого понадобилось бы 2^60 чанков).
+inline constexpr uint64_t kMetaLabelHashSegmentBase = 0xF000000000000000ull;
+inline constexpr uint64_t hashSegmentLabel(uint64_t from)
+{
+    return kMetaLabelHashSegmentBase + from;
+}
+
+// Потолок одного сегмента: 8192 хеша — 256 КиБ открытого текста. Больше
+// в одно сообщение класть незачем, а релею нужен предел, которому он
+// может не верить на слово.
+inline constexpr uint64_t kHashSegmentMax = 8192;
+
+// Клиент говорит релею, что умеет хеши на лету: по HTTP — этим
+// заголовком (у запроса метаданных нет тела), по WebSocket — строкой в
+// features. Старый клиент ни того, ни другого не пришлёт и получит том
+// только целиком посчитанным.
+inline constexpr const char *kFeaturesHeader = "X-Ferry-Features";
+inline constexpr const char *kFeatureStreamHashes = "stream_hashes";
+
 // Коды ошибок (§8). Строками, а не числами: они уходят в JSON и читаются
 // человеком в логе клиента.
 namespace err {
@@ -62,6 +98,10 @@ inline constexpr const char *kChunkMismatch = "chunk_mismatch";
 inline constexpr const char *kServerBusy = "server_busy";
 inline constexpr const char *kOwnerConflict = "owner_conflict";
 inline constexpr const char *kBadMessage = "bad_message";
+// Отправитель ещё считает хеши, а клиент не умеет получать их на лету.
+// Не отказ, а «зайдите через минуту»: как только список досчитан, раздача
+// для такого клиента ничем не отличается от обычной.
+inline constexpr const char *kPreparing = "preparing";
 } // namespace err
 
 } // namespace ferry

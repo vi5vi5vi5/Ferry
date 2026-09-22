@@ -1,5 +1,6 @@
 #include "Cli/Relay.h"
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "core/Base64Url.h"
@@ -148,6 +149,10 @@ bool apiCreateTransfer(const Relay &relay, CreatedTransfer &out, std::string *er
     out.id = v["id"].toString();
     out.ownerToken = v["owner_token"].toString();
     out.publicUrl = v["public_url"].toString();
+    out.features.clear();
+    const json::Value &features = v["features"];
+    for (size_t i = 0; i < features.size(); ++i)
+        out.features.push_back(features.at(i).toString());
     if (out.id.empty() || out.ownerToken.empty()) {
         if (err)
             *err = "сервер не вернул идентификатор раздачи";
@@ -159,8 +164,12 @@ bool apiCreateTransfer(const Relay &relay, CreatedTransfer &out, std::string *er
 bool apiFetchMeta(const Relay &relay, const std::string &id, TransferMeta &out, std::string *err)
 {
     net::HttpResponse resp;
+    // Говорим, что умеем хеши на лету. Без этого релей, у которого
+    // отправитель ещё считает хеши, ответил бы preparing — так он
+    // отвечает старым клиентам.
+    const std::string headers = std::string(kFeaturesHeader) + ": " + kFeatureStreamHashes + "\r\n";
     if (!net::httpRequest(relay.target(), "GET", std::string(kApiTransfers) + "/" + id,
-                          std::string(), resp, err))
+                          std::string(), resp, err, 20000, headers))
         return false;
 
     if (resp.status != 200) {
@@ -188,9 +197,11 @@ bool apiFetchMeta(const Relay &relay, const std::string &id, TransferMeta &out, 
     out.usesLeft = int(v["uses_left"].toInt(-1));
     out.expiresInMs = v["expires_in_ms"].toInt(0);
 
+    out.streamHashes = v["hash_mode"].toString() == "stream";
+    out.hashed = uint64_t(std::max<int64_t>(0, v["hashed"].toInt(0)));
     if (!decodeField(v, "manifest", out.manifest, err))
         return false;
-    if (!decodeField(v, "hash_list", out.hashList, err))
+    if (!out.streamHashes && !decodeField(v, "hash_list", out.hashList, err))
         return false;
     if (!decodeField(v, "nonce_prefix", out.noncePrefix, err))
         return false;
@@ -286,6 +297,9 @@ std::string explainError(const std::string &code)
     if (code == err::kBadMessage)
         return "сервер не понял сообщение клиента. Похоже, версии клиента и "
                "сервера разошлись: обновите клиент командой из install.sh.";
+    if (code == err::kPreparing)
+        return "отправитель ещё считает хеши тома. Подождите минуту и попробуйте "
+               "снова — как только он досчитает, раздача откроется.";
     return "сервер ответил кодом «" + code + "».";
 }
 

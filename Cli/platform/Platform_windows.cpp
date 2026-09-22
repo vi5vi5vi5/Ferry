@@ -1,4 +1,5 @@
 #include "Cli/platform/Platform.h"
+#include "Cli/platform/Threads.h"
 
 #ifdef _WIN32
 
@@ -801,6 +802,77 @@ bool removeSelf(const std::string &exePath, bool *deferred)
     if (info.hProcess)
         ::CloseHandle(info.hProcess);
     return true;
+}
+
+// ------------------------------------------------------------------
+//  Потоки (Threads.h)
+//
+//  SRWLOCK и CONDITION_VARIABLE — по одному указателю, и нулевой — это их
+//  начальное состояние. Поэтому в заголовке лежит void*, а здесь —
+//  приведение к настоящему типу, того же размера.
+// ------------------------------------------------------------------
+
+static_assert(sizeof(SRWLOCK) == sizeof(void *), "SRWLOCK — один указатель");
+static_assert(sizeof(CONDITION_VARIABLE) == sizeof(void *), "CONDITION_VARIABLE — один указатель");
+
+unsigned cpuCount()
+{
+    SYSTEM_INFO si{};
+    ::GetSystemInfo(&si);
+    return si.dwNumberOfProcessors > 0 ? unsigned(si.dwNumberOfProcessors) : 1u;
+}
+
+void sleepMs(int ms)
+{
+    ::Sleep(DWORD(ms > 0 ? ms : 0));
+}
+
+void Mutex::lock()
+{
+    ::AcquireSRWLockExclusive(reinterpret_cast<PSRWLOCK>(&m_srw));
+}
+
+void Mutex::unlock()
+{
+    ::ReleaseSRWLockExclusive(reinterpret_cast<PSRWLOCK>(&m_srw));
+}
+
+void CondVar::wait(Mutex &m)
+{
+    ::SleepConditionVariableSRW(reinterpret_cast<PCONDITION_VARIABLE>(&m_cv),
+                                reinterpret_cast<PSRWLOCK>(&m.m_srw), INFINITE, 0);
+}
+
+void CondVar::notifyOne()
+{
+    ::WakeConditionVariable(reinterpret_cast<PCONDITION_VARIABLE>(&m_cv));
+}
+
+void CondVar::notifyAll()
+{
+    ::WakeAllConditionVariable(reinterpret_cast<PCONDITION_VARIABLE>(&m_cv));
+}
+
+unsigned long __stdcall Thread::entry(void *self)
+{
+    static_cast<Thread *>(self)->m_fn();
+    return 0;
+}
+
+bool Thread::start(std::function<void()> fn)
+{
+    m_fn = std::move(fn);
+    m_handle = ::CreateThread(nullptr, 0, &Thread::entry, this, 0, nullptr);
+    return m_handle != nullptr;
+}
+
+void Thread::join()
+{
+    if (!m_handle)
+        return;
+    ::WaitForSingleObject(HANDLE(m_handle), INFINITE);
+    ::CloseHandle(HANDLE(m_handle));
+    m_handle = nullptr;
 }
 
 } // namespace ferry::platform

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "Cli/net/HttpClient.h"
 #include "Cli/net/WebSocketClient.h"
@@ -33,6 +34,17 @@ struct CreatedTransfer
     std::string id;
     std::string ownerToken;   // base64url, как отдал сервер
     std::string publicUrl;    // каким адресом сервер представляется снаружи
+
+    // Что умеет релей. Старый релей этого поля не шлёт — список пуст, и
+    // отправитель считает хеши заранее, как раньше.
+    std::vector<std::string> features;
+    bool hasFeature(const std::string &name) const
+    {
+        for (const std::string &f : features)
+            if (f == name)
+                return true;
+        return false;
+    }
 };
 
 bool apiCreateTransfer(const Relay &relay, CreatedTransfer &out, std::string *err);
@@ -43,7 +55,13 @@ struct TransferMeta
     uint32_t chunkSize = 0;
     uint64_t chunks = 0;
     Bytes manifest;     // шифротекст
-    Bytes hashList;     // шифротекст
+    Bytes hashList;     // шифротекст; пуст, пока хеши едут на лету
+
+    // Отправитель ещё считает хеши: манифест промежуточный, без корня,
+    // а список приедет сегментами по WebSocket. hashed — сколько чанков
+    // подряд с начала уже посчитано.
+    bool streamHashes = false;
+    uint64_t hashed = 0;
     Bytes noncePrefix;
     std::string mode;
     std::string state;

@@ -527,6 +527,74 @@ if [ -z "$LINK" ]; then bad "ссылка не появилась"; else
 fi
 stop_send
 
+echo ""
+echo "=== 16. Хеши на лету: ссылка раньше, чем посчитан том ==="
+# Раньше отправитель читал том целиком ДО ссылки, и архив на сто гигабайт
+# держал человека у полосы «считаю хеши» по десять минут. Теперь хеши
+# считаются в фоне, а раздача начинается сразу. Чтобы это было видно на
+# быстром диске, подсчёт здесь искусственно замедлен до 50 МБ/с: том в
+# 500 МиБ считается около десяти секунд, а ссылка обязана появиться сильно
+# раньше.
+head -c 524288000 /dev/urandom > stream.bin
+H16=$(sha256sum stream.bin | cut -d' ' -f1)
+export FERRY_TEST_HASH_MBPS=50
+T0=$(date +%s%N)
+LINK=$(start_send stream.bin)
+T1=$(date +%s%N)
+unset FERRY_TEST_HASH_MBPS
+if [ -z "$LINK" ]; then bad "ссылка не появилась"; else
+    MS=$(( (T1 - T0) / 1000000 ))
+    if [ "$MS" -lt 5000 ]; then
+        ok "ссылка через $MS мс — задолго до конца подсчёта (около 10 с)"
+    else
+        bad "ссылка появилась только через $MS мс — хеши считались заранее?"
+    fi
+
+    ID=$(echo "$LINK" | sed 's|.*/t/||; s|#.*||')
+    # Старый клиент заголовка не пришлёт — ему честное «подождите».
+    CODE=$(curl -s -o "$WORK/meta-old.json" -w '%{http_code}' \
+                "http://localhost:8080/api/transfers/$ID")
+    if [ "$CODE" = "409" ] && [ "$(jq -r .error "$WORK/meta-old.json")" = "preparing" ]; then
+        ok "клиент без хешей на лету получает «подождите», а не сломанный том"
+    else
+        bad "старому клиенту ответили $CODE: $(cat "$WORK/meta-old.json")"
+    fi
+    # Новому — промежуточный манифест без списка.
+    MODE=$(curl -s -H 'X-Ferry-Features: stream_hashes' \
+                "http://localhost:8080/api/transfers/$ID" | jq -r .hash_mode)
+    if [ "$MODE" = "stream" ]; then
+        ok "новому клиенту — промежуточный манифест, хеши сегментами"
+    else
+        bad "hash_mode=$MODE"
+    fi
+
+    # Получатель стартует, пока хеши ещё считаются.
+    timeout 300 $FERRY get "$LINK" -y -o stream.out > "$WORK/get16.log" 2>&1
+    R16=$?
+    if [ $R16 -eq 0 ] && [ "$(sha256sum stream.out | cut -d' ' -f1)" = "$H16" ]; then
+        ok "получатель, пришедший во время подсчёта, забрал том целым"
+    else
+        bad "том не сошёлся (код $R16)"; tail -5 "$WORK/get16.log"
+    fi
+
+    # Досчитано — и раздача открыта всем, в том числе старым клиентам.
+    CODE=$(curl -s -o "$WORK/meta-after.json" -w '%{http_code}' \
+                "http://localhost:8080/api/transfers/$ID")
+    if [ "$CODE" = "200" ] \
+       && [ "$(jq -r '.hash_list | length' "$WORK/meta-after.json")" -gt 0 ]; then
+        ok "после подсчёта раздача обычная: полный список отдаётся и старым клиентам"
+    else
+        bad "после подсчёта ответ $CODE"
+    fi
+fi
+stop_send
+if grep -q "хеши посчитаны на лету" "$WORK/send.log"; then
+    ok "отправитель сказал, что считал хеши на лету"
+else
+    bad "в выводе отправителя нет строки про хеши на лету"; tail -8 "$WORK/send.log"
+fi
+rm -f stream.bin stream.out
+
 echo "=== 14. ferry uninstall убирает за собой ==="
 # Ставим копию в песочницу и смотрим, что осталось после неё.
 UNI="$WORK/uninstall"

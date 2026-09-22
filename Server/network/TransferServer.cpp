@@ -124,6 +124,9 @@ QJsonArray TransferServer::serverFeatures()
     QJsonArray f;
     f.append(QStringLiteral("ranges"));
     f.append(QStringLiteral("backfill"));
+    // Хеши на лету: отправитель может начать раздачу, не посчитав том
+    // целиком, а получатель — принимать список сегментами.
+    f.append(QString::fromLatin1(ferry::kFeatureStreamHashes));
     return f;
 }
 
@@ -149,6 +152,8 @@ void TransferServer::onText(ClientSession *session, const QString &text)
         handleRequest(session, msg);
     } else if (type == QLatin1String("bad_chunk")) {
         handleBadChunk(session, msg);
+    } else if (type == QLatin1String("hashes") || type == QLatin1String("hashes_done")) {
+        handleHashes(session, msg, type == QLatin1String("hashes_done"));
     } else if (type == QLatin1String("bye")) {
         session->close();
     } else if (type == QLatin1String("subscribe_live")) {
@@ -276,6 +281,12 @@ void TransferServer::handleHello(ClientSession *session, const QJsonObject &msg)
     ok[QStringLiteral("features")] = serverFeatures();
     session->sendJson(ok);
 
+    // Сегменты хешей — сразу за hello_ok и раньше первого фрейма (он
+    // уйдёт только из pump ниже). Порядок в сокете и есть порядок
+    // прихода, так что хеш каждого чанка окажется у получателя раньше
+    // самого чанка.
+    transfer->sendHashesSoFar(session);
+
     if (TransferSession *t = session->transfer()) {
         if (t->sender())
             t->sender()->sendJson(t->peersJson());
@@ -286,6 +297,28 @@ void TransferServer::handleHello(ClientSession *session, const QJsonObject &msg)
                                                           : QStringLiteral("<id скрыт>"));
 
     transfer->pump();
+}
+
+void TransferServer::handleHashes(ClientSession *session, const QJsonObject &msg, bool done)
+{
+    TransferSession *transfer = session->transfer();
+    if (!transfer || session->role() != ClientSession::Role::Sender) {
+        sendError(session, ferry::err::kBadMessage);
+        return;
+    }
+    QString errorCode;
+    const bool ok = done ? transfer->onHashesDone(msg, &errorCode)
+                         : transfer->onHashes(msg, &errorCode);
+    if (!ok) {
+        // Сломанный сегмент — сломанный отправитель: дальше чанки
+        // проверять будет не против чего. Закрываем, как и на сломанный
+        // фрейм.
+        sendError(session, errorCode.toLatin1().constData(), true);
+        return;
+    }
+    // Досчитанный список мог открыть дорогу тем, кто ждал.
+    if (done)
+        transfer->pump();
 }
 
 void TransferServer::handleHave(ClientSession *session, const QJsonObject &msg)

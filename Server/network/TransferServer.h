@@ -42,6 +42,18 @@ public:
     // работает, и это стоит одного вызова.
     void adoptConnection(QTcpSocket *socket);
 
+    // Что умеет ЭТОТ сервер. Уезжает в offer_ok и hello_ok, и клиент по
+    // нему решает, какие сообщения вообще посылать. А ещё — в ответ на
+    // POST /api/transfers: отправителю это нужно знать раньше, чем он
+    // соберёт offer (см. хеши на лету).
+    //
+    // Объявление нужно из-за строгости разбора: неизвестное сообщение —
+    // это bad_message, а не «промолчу». Строгость правильная (мусор на
+    // проводе должен быть виден сразу), но за неё приходится платить
+    // честным ответом на вопрос «а ты меня поймёшь». Без него новый
+    // клиент, встретив старый релей, получал бы отказ на первом же have.
+    static QJsonArray serverFeatures();
+
 private slots:
     void onNewConnection();
     void onText(ClientSession *session, const QString &text);
@@ -54,19 +66,11 @@ private:
     void handleOffer(ClientSession *session, const QJsonObject &msg);
     void handleHello(ClientSession *session, const QJsonObject &msg);
     void handleAck(ClientSession *session, const QJsonObject &msg);
+    void handleHashes(ClientSession *session, const QJsonObject &msg, bool done);
     void handleHave(ClientSession *session, const QJsonObject &msg);
     void handleRequest(ClientSession *session, const QJsonObject &msg);
     void handleBadChunk(ClientSession *session, const QJsonObject &msg);
 
-    // Что умеет ЭТОТ сервер. Уезжает в offer_ok и hello_ok, и клиент по
-    // нему решает, какие сообщения вообще посылать.
-    //
-    // Объявление нужно из-за строгости разбора: неизвестное сообщение —
-    // это bad_message, а не «промолчу». Строгость правильная (мусор на
-    // проводе должен быть виден сразу), но за неё приходится платить
-    // честным ответом на вопрос «а ты меня поймёшь». Без него новый
-    // клиент, встретив старый релей, получал бы отказ на первом же have.
-    static QJsonArray serverFeatures();
     void sendError(ClientSession *session, const char *reason, bool closeAfter = true);
 
     // Сравнение без утечки по времени. Токен владельца и доказательство

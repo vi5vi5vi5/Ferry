@@ -30,6 +30,11 @@ struct Manifest
     Hash32 root{};               // BLAKE3 над списком хешей чанков
     std::vector<ManifestEntry> entries;   // только для kind == "tree"
 
+    // Промежуточный манифест раздачи с хешами на лету: корня ещё нет,
+    // список приезжает сегментами. Итоговый манифест той же раздачи —
+    // обычный, с корнем, и его ждут в том числе старые клиенты.
+    bool streamHashes = false;
+
     bool isTree() const { return kind == "tree"; }
 
     std::string toJson() const;

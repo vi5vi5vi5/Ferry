@@ -10,6 +10,7 @@
 #include "core/TransferRegistry.h"
 #include "core/TransferSession.h"
 #include "network/HttpRequest.h"
+#include "network/TransferServer.h"
 
 #ifndef FERRY_COMMIT
 #define FERRY_COMMIT "unknown"
@@ -83,10 +84,16 @@ bool HttpApi::route(const HttpRequest &req, const Responder &respond)
             respond(ApiResponse::error(404, ferry::err::kNotFound));
             return true;
         }
-        if (wantsChallenge)
+        if (wantsChallenge) {
             handleChallenge(id, respond);
-        else
-            handleMeta(id, respond);
+        } else {
+            // У запроса метаданных нет тела, поэтому клиент говорит,
+            // что умеет хеши на лету, заголовком.
+            const bool streamClient =
+                req.header(QByteArrayLiteral("x-ferry-features"))
+                    .contains(ferry::kFeatureStreamHashes);
+            handleMeta(id, streamClient, respond);
+        }
         return true;
     }
 
@@ -116,6 +123,10 @@ void HttpApi::handleCreate(const HttpRequest &req, const Responder &respond)
     // Публичный адрес нужен клиенту, чтобы собрать ссылку. Если владелец
     // сервера его не задал, клиент подставит тот адрес, по которому пришёл.
     o[QStringLiteral("public_url")] = m_config.publicUrl;
+    // Что умеет релей — отправителю нужно знать это ДО offer: от ответа
+    // зависит, считать ли хеши заранее или отдавать их на лету. Релей,
+    // который этого поля не пришлёт, получит offer по-старому.
+    o[QStringLiteral("features")] = TransferServer::serverFeatures();
     respond(ApiResponse::json(201, o));
 
     qInfo().noquote() << QStringLiteral("раздача заведена: %1")
@@ -123,7 +134,7 @@ void HttpApi::handleCreate(const HttpRequest &req, const Responder &respond)
                                                           : QStringLiteral("<id скрыт>"));
 }
 
-void HttpApi::handleMeta(const QByteArray &id, const Responder &respond)
+void HttpApi::handleMeta(const QByteArray &id, bool streamClient, const Responder &respond)
 {
     TransferSession *session = m_registry->find(id);
     // Черновик (POST был, offer ещё нет) снаружи выглядит как отсутствие
@@ -135,7 +146,14 @@ void HttpApi::handleMeta(const QByteArray &id, const Responder &respond)
     // Эта ручка НИЧЕГО НЕ СЖИГАЕТ — ни использования, ни challenge. По ней
     // ходят превью-боты мессенджеров, и это нормально: имени файла здесь
     // нет (оно внутри зашифрованного манифеста), а счётчик не трогается.
-    respond(ApiResponse::json(200, session->metaJson(QDateTime::currentMSecsSinceEpoch())));
+    // Отправитель ещё считает хеши, а клиент не умеет принимать их
+    // сегментами. 409, а не 404: раздача есть, просто пока не для него.
+    if (session->streamingHashes() && !streamClient) {
+        respond(ApiResponse::error(409, ferry::err::kPreparing));
+        return;
+    }
+    respond(ApiResponse::json(
+        200, session->metaJson(QDateTime::currentMSecsSinceEpoch(), streamClient)));
 }
 
 void HttpApi::handleChallenge(const QByteArray &id, const Responder &respond)

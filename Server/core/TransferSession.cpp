@@ -87,6 +87,8 @@ quint32 parseFeatures(const QJsonValue &value)
             flags |= ClientSession::FeatureRanges;
         else if (name == QLatin1String("backfill"))
             flags |= ClientSession::FeatureBackfill;
+        else if (name == QLatin1String("stream_hashes"))
+            flags |= ClientSession::FeatureStreamHashes;
     }
     return flags;
 }
@@ -150,17 +152,39 @@ bool TransferSession::applyOffer(const QJsonObject &msg, QString *errorCode)
     // размер: список хешей обязан быть ровно 32 байта на чанк плюс тег GCM,
     // иначе получатель не сможет проверить ни одного чанка, а узнает он об
     // этом уже после того, как выкачает половину тома.
-    m_encryptedManifest = QByteArray::fromBase64(
+    const QByteArray manifest = QByteArray::fromBase64(
         msg.value(QStringLiteral("manifest")).toString().toLatin1(),
         QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
-    m_encryptedHashList = QByteArray::fromBase64(
-        msg.value(QStringLiteral("hash_list")).toString().toLatin1(),
-        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
-    if (m_encryptedManifest.isEmpty() || m_encryptedManifest.size() > 16 * 1024 * 1024)
+    if (manifest.isEmpty() || manifest.size() > 16 * 1024 * 1024)
         return fail(ferry::err::kBadMessage);
-    const qint64 expectHashBytes = qint64(plan.chunkCount) * 32 + qint64(ferry::kGcmTagSize);
-    if (m_encryptedHashList.size() != expectHashBytes)
+
+    // Хеши на лету: списка в offer нет, он приедет сегментами, а манифест
+    // пока промежуточный. Итоговые манифест и список займут обычные
+    // места, когда отправитель досчитает (onHashesDone).
+    const QString hashMode = msg.value(QStringLiteral("hash_mode")).toString();
+    if (!hashMode.isEmpty() && hashMode != QLatin1String("stream"))
         return fail(ferry::err::kBadMessage);
+    m_streamHashes = hashMode == QLatin1String("stream");
+    m_hashesComplete = !m_streamHashes;
+    m_hashedUpTo = 0;
+    m_hashSegments.clear();
+    m_hashesDoneMsg = QJsonObject();
+    if (m_streamHashes) {
+        if (msg.contains(QStringLiteral("hash_list")))
+            return fail(ferry::err::kBadMessage);
+        m_encryptedStreamManifest = manifest;
+        m_encryptedManifest.clear();
+        m_encryptedHashList.clear();
+    } else {
+        m_encryptedManifest = manifest;
+        m_encryptedHashList = QByteArray::fromBase64(
+            msg.value(QStringLiteral("hash_list")).toString().toLatin1(),
+            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+        const qint64 expectHashBytes =
+            qint64(plan.chunkCount) * 32 + qint64(ferry::kGcmTagSize);
+        if (m_encryptedHashList.size() != expectHashBytes)
+            return fail(ferry::err::kBadMessage);
+    }
 
     m_totalBytes = quint64(total);
     m_chunkSize = quint32(chunkSize);
@@ -194,17 +218,27 @@ bool TransferSession::applyOffer(const QJsonObject &msg, QString *errorCode)
     return true;
 }
 
-QJsonObject TransferSession::metaJson(qint64 nowMs) const
+QJsonObject TransferSession::metaJson(qint64 nowMs, bool streamClient) const
 {
     QJsonObject o;
     o[QStringLiteral("id")] = QString::fromLatin1(m_id);
     o[QStringLiteral("total")] = double(m_totalBytes);
     o[QStringLiteral("chunk_size")] = double(m_chunkSize);
     o[QStringLiteral("chunks")] = double(m_chunkCount);
-    o[QStringLiteral("manifest")] = QString::fromLatin1(m_encryptedManifest.toBase64(
-        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
-    o[QStringLiteral("hash_list")] = QString::fromLatin1(m_encryptedHashList.toBase64(
-        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+    if (streamingHashes()) {
+        // Сюда попадает только тот, кто умеет хеши на лету: остальным
+        // HttpApi отвечает preparing, не доходя до этой функции.
+        Q_UNUSED(streamClient)
+        o[QStringLiteral("hash_mode")] = QStringLiteral("stream");
+        o[QStringLiteral("hashed")] = double(m_hashedUpTo);
+        o[QStringLiteral("manifest")] = QString::fromLatin1(m_encryptedStreamManifest.toBase64(
+            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+    } else {
+        o[QStringLiteral("manifest")] = QString::fromLatin1(m_encryptedManifest.toBase64(
+            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+        o[QStringLiteral("hash_list")] = QString::fromLatin1(m_encryptedHashList.toBase64(
+            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+    }
     o[QStringLiteral("nonce_prefix")] = QString::fromLatin1(m_noncePrefix.toBase64(
         QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
     o[QStringLiteral("mode")] = m_mode;
@@ -243,6 +277,21 @@ bool TransferSession::attachReceiver(ClientSession *receiver, const QJsonObject 
 
     // ---- что клиент умеет и что у него уже есть ----
     receiver->setFeatures(parseFeatures(hello.value(QStringLiteral("features"))));
+
+    // Хеши ещё считаются, а клиент не умеет принимать их сегментами.
+    // Пустить его дальше нельзя — проверять чанки ему не против чего, —
+    // но и отказ окончательным быть не должен: как только отправитель
+    // досчитает, раздача для него станет обычной.
+    const bool wantsStream =
+        hello.value(QStringLiteral("hashes")).toString() == QLatin1String("stream");
+    if (streamingHashes()
+        && !(wantsStream && receiver->speaks(ClientSession::FeatureStreamHashes)))
+        return fail(ferry::err::kPreparing);
+    // Просить сегменты можно только у раздачи с хешами на лету — у
+    // обычной их не было и не будет.
+    if (wantsStream && !m_streamHashes)
+        return fail(ferry::err::kBadMessage);
+    receiver->setWantsHashStream(wantsStream);
     receiver->have().reset(m_chunkCount);
     receiver->sent().reset(m_chunkCount);
     receiver->wanted().reset(m_chunkCount);
@@ -348,6 +397,106 @@ void TransferSession::detach(ClientSession *session)
     pump();
 }
 
+bool TransferSession::onHashes(const QJsonObject &msg, QString *errorCode)
+{
+    const auto fail = [&](const char *code) {
+        if (errorCode)
+            *errorCode = QString::fromLatin1(code);
+        return false;
+    };
+    if (!m_hasOffer || m_state != State::Active || !m_streamHashes || m_hashesComplete)
+        return fail(ferry::err::kBadMessage);
+
+    // Сегменты идут строго встык: следующий начинается там, где кончился
+    // предыдущий. Иначе «сколько посчитано» перестало бы быть одним
+    // числом, а правило «чанк не раньше хеша» — проверяемым.
+    const double fromRaw = msg.value(QStringLiteral("from")).toDouble(-1);
+    const double countRaw = msg.value(QStringLiteral("count")).toDouble(-1);
+    if (fromRaw < 0 || countRaw < 1 || countRaw > double(ferry::kHashSegmentMax))
+        return fail(ferry::err::kBadMessage);
+    const quint64 from = quint64(fromRaw);
+    const quint64 count = quint64(countRaw);
+    if (from != m_hashedUpTo || from + count > m_chunkCount)
+        return fail(ferry::err::kBadMessage);
+
+    // Сам сегмент — непрозрачные байты под K_meta. Сервер проверяет только
+    // длину: 32 байта на хеш плюс тег GCM.
+    const QString data = msg.value(QStringLiteral("data")).toString();
+    const QByteArray raw = QByteArray::fromBase64(
+        data.toLatin1(), QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+    if (raw.size() != qint64(count) * 32 + qint64(ferry::kGcmTagSize))
+        return fail(ferry::err::kBadMessage);
+
+    QJsonObject out;
+    out[QStringLiteral("type")] = QStringLiteral("hashes");
+    out[QStringLiteral("from")] = double(from);
+    out[QStringLiteral("count")] = double(count);
+    out[QStringLiteral("data")] = data;
+    m_hashSegments.append(out);
+    m_hashedUpTo = from + count;
+
+    // Сразу всем, кто ждёт сегменты. В очереди сокета это встанет раньше
+    // любого чанка из этого сегмента: чанки сюда ещё не приходили.
+    for (ClientSession *r : std::as_const(m_receivers)) {
+        if (r->wantsHashStream())
+            r->sendJson(out);
+    }
+    return true;
+}
+
+bool TransferSession::onHashesDone(const QJsonObject &msg, QString *errorCode)
+{
+    const auto fail = [&](const char *code) {
+        if (errorCode)
+            *errorCode = QString::fromLatin1(code);
+        return false;
+    };
+    if (!m_hasOffer || m_state != State::Active || !m_streamHashes || m_hashesComplete)
+        return fail(ferry::err::kBadMessage);
+    if (m_hashedUpTo != m_chunkCount)
+        return fail(ferry::err::kBadMessage);
+
+    // Итоговые манифест и список — в том самом виде, в каком их ждёт
+    // любой клиент, включая старый. С этой минуты раздача снаружи
+    // ничем не отличается от обычной.
+    const QByteArray manifest = QByteArray::fromBase64(
+        msg.value(QStringLiteral("manifest")).toString().toLatin1(),
+        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+    const QByteArray hashList = QByteArray::fromBase64(
+        msg.value(QStringLiteral("hash_list")).toString().toLatin1(),
+        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+    if (manifest.isEmpty() || manifest.size() > 16 * 1024 * 1024)
+        return fail(ferry::err::kBadMessage);
+    if (hashList.size() != qint64(m_chunkCount) * 32 + qint64(ferry::kGcmTagSize))
+        return fail(ferry::err::kBadMessage);
+
+    m_encryptedManifest = manifest;
+    m_encryptedHashList = hashList;
+    m_hashesComplete = true;
+
+    // Тем, кто ехал с сегментами, — итоговый манифест: по нему они
+    // сверяют корень и дописывают его в карту принятого.
+    QJsonObject out;
+    out[QStringLiteral("type")] = QStringLiteral("hashes_done");
+    out[QStringLiteral("manifest")] = msg.value(QStringLiteral("manifest"));
+    m_hashesDoneMsg = out;
+    for (ClientSession *r : std::as_const(m_receivers)) {
+        if (r->wantsHashStream())
+            r->sendJson(out);
+    }
+    return true;
+}
+
+void TransferSession::sendHashesSoFar(ClientSession *receiver)
+{
+    if (!receiver->wantsHashStream())
+        return;
+    for (const QJsonObject &seg : std::as_const(m_hashSegments))
+        receiver->sendJson(seg);
+    if (m_hashesComplete && !m_hashesDoneMsg.isEmpty())
+        receiver->sendJson(m_hashesDoneMsg);
+}
+
 bool TransferSession::onSenderFrame(const QByteArray &frame, QString *errorCode)
 {
     const auto fail = [&](const char *code) {
@@ -365,6 +514,13 @@ bool TransferSession::onSenderFrame(const QByteArray &frame, QString *errorCode)
 
     const quint64 index = readBe64(frame.constData() + 1);
     if (index >= m_chunkCount)
+        return fail(ferry::err::kBadMessage);
+
+    // Хеши на лету держатся на одном правиле: чанк не приходит раньше
+    // своего хеша. Получатель видит в сокете ровно тот порядок, в каком
+    // мы отдаём, и чанк без хеша ему проверить не против чего. Отправитель,
+    // нарушивший это, сломан, и разговаривать с ним дальше не о чем.
+    if (m_streamHashes && index >= m_hashedUpTo)
         return fail(ferry::err::kBadMessage);
 
     // Длина обязана сойтись ровно: чанк плюс тег GCM. Проверка нужна не
