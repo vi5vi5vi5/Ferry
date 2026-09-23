@@ -97,6 +97,21 @@ struct Walker
             if (out->manifest.entries.size() >= kMaxEntries)
                 return fail("в каталоге больше " + std::to_string(kMaxEntries) + " файлов");
 
+            // Файл, который не открывается на чтение, выясняем СЕЙЧАС, а не
+            // через час раздачи. Раньше такой файл (нет прав, держит другая
+            // программа, антивирус не пускает) ронял раздачу посередине, и
+            // человек узнавал об этом, когда половина уже уехала. Теперь он
+            // в списке пропущенного, с причиной, до ссылки — как симлинки.
+            if (e.size > 0) {
+                const platform::File probe = platform::fileOpenRead(root + "/" + childRel);
+                if (probe == platform::kInvalidFile) {
+                    out->skipped.push_back(childRel + " (не читается: " + platform::lastFileError()
+                                           + ")");
+                    continue;
+                }
+                platform::fileClose(probe);
+            }
+
             ManifestEntry me;
             me.path = childRel;
             me.size = e.size;

@@ -30,14 +30,14 @@ bool VolumeFile::openSingle(const std::string &path, bool forWrite, uint64_t siz
 
     m_single = forWrite ? platform::fileOpenReadWrite(path) : platform::fileOpenRead(path);
     if (m_single == platform::kInvalidFile) {
-        m_error = "не удалось открыть " + path;
+        m_error = "не удалось открыть " + path + ": " + platform::lastFileError();
         return false;
     }
     // Растягиваем сразу на полный размер: дальше пишем по смещениям, и
     // место должно быть заранее — иначе первая же дырка превратится в
     // ошибку записи на середине тома.
     if (forWrite && !platform::fileTruncate(m_single, size)) {
-        m_error = "не хватает места под " + path;
+        m_error = "не хватает места под " + path + ": " + platform::lastFileError();
         platform::fileClose(m_single);
         m_single = platform::kInvalidFile;
         return false;
@@ -123,11 +123,11 @@ platform::File VolumeFile::handleFor(size_t file)
     const platform::File fd =
         m_write ? platform::fileOpenReadWrite(full) : platform::fileOpenRead(full);
     if (fd == platform::kInvalidFile) {
-        m_error = "не удалось открыть " + f.path;
+        m_error = "не удалось открыть " + f.path + ": " + platform::lastFileError();
         return platform::kInvalidFile;
     }
     if (m_write && !platform::fileTruncate(fd, f.size)) {
-        m_error = "не хватает места под " + f.path;
+        m_error = "не хватает места под " + f.path + ": " + platform::lastFileError();
         platform::fileClose(fd);
         return platform::kInvalidFile;
     }
@@ -144,8 +144,14 @@ platform::File VolumeFile::handleFor(size_t file)
 
 int64_t VolumeFile::readAt(void *buf, size_t len, uint64_t offset)
 {
-    if (!m_tree)
-        return platform::fileReadAt(m_single, buf, len, offset);
+    if (!m_tree) {
+        const int64_t got = platform::fileReadAt(m_single, buf, len, offset);
+        if (got < 0)
+            m_error = "не удалось прочитать файл: " + platform::lastFileError();
+        else if (got != int64_t(len))
+            m_error = "файл стал короче, чем был в начале раздачи, — его изменили во время раздачи";
+        return got;
+    }
 
     auto *out = static_cast<uint8_t *>(buf);
     int64_t done = 0;
@@ -154,8 +160,14 @@ int64_t VolumeFile::readAt(void *buf, size_t len, uint64_t offset)
         if (fd == platform::kInvalidFile)
             return -1;
         const int64_t got = platform::fileReadAt(fd, out + done, size_t(p.length), p.offset);
+        if (got < 0) {
+            m_error = "не удалось прочитать " + m_layout->files()[p.file].path + ": "
+                      + platform::lastFileError();
+            return -1;
+        }
         if (got != int64_t(p.length)) {
-            m_error = "файл перестал читаться: " + m_layout->files()[p.file].path;
+            m_error = m_layout->files()[p.file].path
+                      + " стал короче, чем был при описи, — его изменили во время раздачи";
             return -1;
         }
         done += got;
@@ -165,8 +177,12 @@ int64_t VolumeFile::readAt(void *buf, size_t len, uint64_t offset)
 
 int64_t VolumeFile::writeAt(const void *buf, size_t len, uint64_t offset)
 {
-    if (!m_tree)
-        return platform::fileWriteAt(m_single, buf, len, offset);
+    if (!m_tree) {
+        const int64_t put = platform::fileWriteAt(m_single, buf, len, offset);
+        if (put != int64_t(len))
+            m_error = "не удалось записать файл: " + platform::lastFileError();
+        return put;
+    }
 
     const auto *in = static_cast<const uint8_t *>(buf);
     int64_t done = 0;
@@ -176,7 +192,8 @@ int64_t VolumeFile::writeAt(const void *buf, size_t len, uint64_t offset)
             return -1;
         const int64_t put = platform::fileWriteAt(fd, in + done, size_t(p.length), p.offset);
         if (put != int64_t(p.length)) {
-            m_error = "не удалось записать " + m_layout->files()[p.file].path;
+            m_error = "не удалось записать " + m_layout->files()[p.file].path + ": "
+                      + platform::lastFileError();
             return -1;
         }
         done += put;

@@ -691,6 +691,12 @@ int runSend(const Options &options, const Relay &relay)
                 failure = pump.error();
                 break;
             }
+            // Сразу в сокет, пока читается и шифруется следующий.
+            if (!ws.flush()) {
+                failed = true;
+                failure = ws.error().empty() ? std::string("соединение закрылось") : ws.error();
+                break;
+            }
             const uint32_t len = pump.lastPlainSize();
             meter.add(len);
 

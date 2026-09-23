@@ -595,6 +595,31 @@ else
 fi
 rm -f stream.bin stream.out
 
+echo ""
+echo "=== 17. Нечитаемый файл виден до ссылки, а не роняет раздачу ==="
+# С файлового сервера раздача падала посередине на архиве, который не
+# читался, и говорила только «файл перестал читаться». Теперь такой файл
+# выясняется при описи и попадает в список пропущенного — с причиной от
+# системы. Отправитель здесь не root: root права на чтение не проверяет.
+rm -rf perm_src
+mkdir -p perm_src
+echo "обычный" > perm_src/a.txt
+head -c 3000000 /dev/urandom > perm_src/закрытый.zip
+chmod -R a+rX perm_src
+chmod 000 perm_src/закрытый.zip
+OUT=$(runuser -u nobody -- $FERRY send perm_src --relay http://127.0.0.1:9 --no-qr 2>&1 || true)
+if echo "$OUT" | grep -q "закрытый.zip (не читается: Permission denied"; then
+    ok "нечитаемый архив назван до ссылки, с причиной от системы"
+else
+    bad "про нечитаемый архив не сказано"; echo "$OUT" | tail -8
+fi
+if echo "$OUT" | grep -q "1 файл$\|1 файл "; then
+    ok "в томе остался только читаемый файл"
+else
+    bad "состав тома не тот"; echo "$OUT" | grep 'состав'
+fi
+rm -rf perm_src
+
 echo "=== 14. ferry uninstall убирает за собой ==="
 # Ставим копию в песочницу и смотрим, что осталось после неё.
 UNI="$WORK/uninstall"

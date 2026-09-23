@@ -22,6 +22,7 @@
 #include <shellapi.h>
 #include <wincrypt.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
@@ -77,7 +78,49 @@ std::wstring toWidePath(const std::string &utf8)
         if (c == L'/')
             c = L'\\';
     }
+
+    // Путь длиннее MAX_PATH без префикса \\?\ Windows просто не находит —
+    // а на файловом сервере глубокие папки с длинными русскими именами
+    // встречаются постоянно. Префикс требует полного пути, поэтому сначала
+    // GetFullPathNameW. Короткие пути не трогаем вовсе.
+    if (w.size() >= 240 && w.rfind(L"\\\\?\\", 0) != 0) {
+        const DWORD need = ::GetFullPathNameW(w.c_str(), 0, nullptr, nullptr);
+        if (need > 0) {
+            std::wstring full(need, L'\0');
+            const DWORD got = ::GetFullPathNameW(w.c_str(), need, full.data(), nullptr);
+            if (got > 0 && got < need) {
+                full.resize(got);
+                if (full.rfind(L"\\\\", 0) == 0)
+                    return L"\\\\?\\UNC\\" + full.substr(2);   // \\server\share
+                return L"\\\\?\\" + full;
+            }
+        }
+    }
     return w;
+}
+
+// Сбои, которые проходят сами: файл держит антивирус или другая программа,
+// на диапазоне чужая блокировка. Повторяем с нарастающей паузой — всего
+// около трёх секунд, — прежде чем признать ошибку.
+bool transientFileError(DWORD e)
+{
+    return e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION;
+}
+
+HANDLE openWithRetry(const std::wstring &path, DWORD access, DWORD share, DWORD disposition)
+{
+    for (int attempt = 0;; ++attempt) {
+        const HANDLE h = ::CreateFileW(path.c_str(), access, share, nullptr, disposition,
+                                       FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE)
+            return h;
+        const DWORD e = ::GetLastError();
+        if (!transientFileError(e) || attempt >= 10) {
+            ::SetLastError(e);
+            return INVALID_HANDLE_VALUE;
+        }
+        ::Sleep(DWORD(50 * (attempt + 1)));
+    }
 }
 
 bool g_ansiEnabled = false;
@@ -168,6 +211,26 @@ void netShutdown()
     // вызов на фоне живых сокетов иногда подвешивает выход.
 }
 
+// Только для замеров: FERRY_TEST_BIND=<локальный IPv4> привязывает
+// соединение к этому адресу, и система ведёт его через интерфейс этого
+// адреса. Нужно, чтобы мерить настоящую сеть на машине, где VPN в режиме
+// TUN перехватывает весь трафик: такой туннель заканчивает TCP у себя, и
+// настоящую задержку до релея клиент вообще не видит. Людям это не нужно,
+// в справке этого нет. IPv6 при заданной привязке пропускаем.
+static bool bindForTest(SOCKET fd, int family)
+{
+    const char *addr = std::getenv("FERRY_TEST_BIND");
+    if (!addr || !*addr)
+        return true;
+    if (family != AF_INET)
+        return false;
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    if (::inet_pton(AF_INET, addr, &sa.sin_addr) != 1)
+        return false;
+    return ::bind(fd, reinterpret_cast<const sockaddr *>(&sa), int(sizeof(sa))) == 0;
+}
+
 Socket connectTcp(const std::string &host, uint16_t port, int timeoutMs, std::string *err)
 {
     netInit();
@@ -193,6 +256,10 @@ Socket connectTcp(const std::string &host, uint16_t port, int timeoutMs, std::st
         const SOCKET fd = ::socket(a->ai_family, a->ai_socktype, a->ai_protocol);
         if (fd == INVALID_SOCKET)
             continue;
+        if (!bindForTest(fd, a->ai_family)) {
+            ::closesocket(fd);
+            continue;
+        }
 
         setNonBlocking(Socket(fd));
         int rcConnect = ::connect(fd, a->ai_addr, int(a->ai_addrlen));
@@ -218,6 +285,18 @@ Socket connectTcp(const std::string &host, uint16_t port, int timeoutMs, std::st
             int one = 1;
             ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char *>(&one),
                          sizeof(one));
+
+            // Буфер отправки — явно и с запасом. Без этого отправитель на
+            // живом канале терял треть скорости: пока он читает с диска и
+            // шифрует следующий чанк, в сокет ничего не пишется, а то, что
+            // Windows держит в очереди сама, на задержке в 26 мс кончается
+            // раньше. Замер до fin1: 7,5 МБ/с против 11,9 у голого потока.
+            // 4 МиБ — это с запасом больше «полоса × задержка» для любого
+            // домашнего канала. Буфер ПРИЁМА не трогаем: его Windows
+            // подстраивает сама и хорошо, а явное значение это выключило бы.
+            int sndbuf = 4 * 1024 * 1024;
+            ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char *>(&sndbuf),
+                         sizeof(sndbuf));
             return Socket(fd);
         }
 
@@ -390,18 +469,39 @@ std::vector<std::string> systemRootCertificates()
 
 File fileOpenRead(const std::string &path)
 {
-    const HANDLE h = ::CreateFileW(toWidePath(path).c_str(), GENERIC_READ,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+    // FILE_SHARE_DELETE тоже: иначе мы мешали бы программам, которые
+    // пишут файл через «записать рядом и переименовать».
+    const HANDLE h = openWithRetry(toWidePath(path), GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   OPEN_EXISTING);
     return h == INVALID_HANDLE_VALUE ? kInvalidFile : File(h);
 }
 
 File fileOpenReadWrite(const std::string &path)
 {
-    const HANDLE h = ::CreateFileW(toWidePath(path).c_str(), GENERIC_READ | GENERIC_WRITE,
-                                   FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL,
-                                   nullptr);
+    const HANDLE h = openWithRetry(toWidePath(path), GENERIC_READ | GENERIC_WRITE,
+                                   FILE_SHARE_READ, OPEN_ALWAYS);
     return h == INVALID_HANDLE_VALUE ? kInvalidFile : File(h);
+}
+
+std::string lastFileError()
+{
+    const DWORD e = ::GetLastError();
+    wchar_t *msg = nullptr;
+    const DWORD n = ::FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
+                                         | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                     nullptr, e, 0, reinterpret_cast<wchar_t *>(&msg), 0, nullptr);
+    std::string text;
+    if (n > 0 && msg) {
+        text = toUtf8(std::wstring(msg, n));
+        ::LocalFree(msg);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' '
+                                 || text.back() == '.'))
+            text.pop_back();
+    }
+    if (text.empty())
+        text = "системная ошибка";
+    return text + " (код " + std::to_string(e) + ")";
 }
 
 void fileClose(File f)
@@ -415,30 +515,63 @@ int64_t fileReadAt(File f, void *buf, size_t len, uint64_t offset)
     // OVERLAPPED на обычном (не асинхронном) дескрипторе — законный способ
     // прочитать по смещению, не трогая общий курсор файла. Вызов при этом
     // остаётся синхронным, и это ровно то, что нам нужно: аналог pread.
-    OVERLAPPED ov{};
-    ov.Offset = DWORD(offset & 0xFFFFFFFFull);
-    ov.OffsetHigh = DWORD(offset >> 32);
+    auto *out = static_cast<uint8_t *>(buf);
+    size_t done = 0;
+    int retries = 0;
+    while (done < len) {
+        const uint64_t at = offset + done;
+        OVERLAPPED ov{};
+        ov.Offset = DWORD(at & 0xFFFFFFFFull);
+        ov.OffsetHigh = DWORD(at >> 32);
 
-    DWORD got = 0;
-    if (!::ReadFile(HANDLE(f), buf, DWORD(len), &got, &ov)) {
-        // Конец файла при чтении по смещению приходит именно так.
-        if (::GetLastError() == ERROR_HANDLE_EOF)
-            return 0;
-        return -1;
+        DWORD got = 0;
+        const DWORD want = DWORD(std::min<size_t>(len - done, 64u * 1024u * 1024u));
+        if (!::ReadFile(HANDLE(f), out + done, want, &got, &ov)) {
+            const DWORD e = ::GetLastError();
+            // Конец файла при чтении по смещению приходит именно так.
+            if (e == ERROR_HANDLE_EOF)
+                break;
+            if (transientFileError(e) && retries < 10) {
+                ::Sleep(DWORD(50 * ++retries));
+                continue;
+            }
+            ::SetLastError(e);
+            return -1;
+        }
+        if (got == 0)
+            break;
+        done += got;
     }
-    return int64_t(got);
+    return int64_t(done);
 }
 
 int64_t fileWriteAt(File f, const void *buf, size_t len, uint64_t offset)
 {
-    OVERLAPPED ov{};
-    ov.Offset = DWORD(offset & 0xFFFFFFFFull);
-    ov.OffsetHigh = DWORD(offset >> 32);
+    const auto *in = static_cast<const uint8_t *>(buf);
+    size_t done = 0;
+    int retries = 0;
+    while (done < len) {
+        const uint64_t at = offset + done;
+        OVERLAPPED ov{};
+        ov.Offset = DWORD(at & 0xFFFFFFFFull);
+        ov.OffsetHigh = DWORD(at >> 32);
 
-    DWORD written = 0;
-    if (!::WriteFile(HANDLE(f), buf, DWORD(len), &written, &ov))
-        return -1;
-    return int64_t(written);
+        DWORD written = 0;
+        const DWORD want = DWORD(std::min<size_t>(len - done, 64u * 1024u * 1024u));
+        if (!::WriteFile(HANDLE(f), in + done, want, &written, &ov)) {
+            const DWORD e = ::GetLastError();
+            if (transientFileError(e) && retries < 10) {
+                ::Sleep(DWORD(50 * ++retries));
+                continue;
+            }
+            ::SetLastError(e);
+            return -1;
+        }
+        if (written == 0)
+            return -1;
+        done += written;
+    }
+    return int64_t(done);
 }
 
 bool fileTruncate(File f, uint64_t size)
@@ -592,18 +725,19 @@ bool makeDirectories(const std::string &path)
     std::wstring current;
     for (size_t i = 0; i <= full.size(); ++i) {
         if (i == full.size() || full[i] == L'\\') {
-            // «C:» само по себе не каталог — создавать его не пытаемся.
-            const bool isDriveRoot = current.size() == 2 && current[1] == L':';
-            if (!current.empty() && !isDriveRoot) {
-                if (!::CreateDirectoryW(current.c_str(), nullptr)
-                    && ::GetLastError() != ERROR_ALREADY_EXISTS)
-                    return false;
-            }
+            // Создаём каждый уровень, а ошибки на промежуточных не считаем:
+            // начало пути бывает чем угодно, только не каталогом, который
+            // можно создать, — «C:», префикс длинного пути «\\?\»,
+            // «\\server\share» сетевой папки. Угадывать, где кончается
+            // корень, — значит однажды не угадать; проверяем результат.
+            if (!current.empty())
+                ::CreateDirectoryW(current.c_str(), nullptr);
         }
         if (i < full.size())
             current += full[i];
     }
-    return true;
+    const DWORD attrs = ::GetFileAttributesW(full.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
 // ------------------------------------------------------------------

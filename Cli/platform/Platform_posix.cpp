@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <arpa/inet.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -45,6 +46,26 @@ std::vector<std::string> arguments(int argc, char **argv)
 void netInit() {}
 void netShutdown() {}
 
+// Только для замеров: FERRY_TEST_BIND=<локальный IPv4> привязывает
+// соединение к этому адресу, и система ведёт его через интерфейс этого
+// адреса. Нужно, чтобы мерить настоящую сеть на машине, где VPN в режиме
+// TUN перехватывает весь трафик: такой туннель заканчивает TCP у себя, и
+// настоящую задержку до релея клиент вообще не видит. Людям это не нужно,
+// в справке этого нет. IPv6 при заданной привязке пропускаем.
+static bool bindForTest(int fd, int family)
+{
+    const char *addr = std::getenv("FERRY_TEST_BIND");
+    if (!addr || !*addr)
+        return true;
+    if (family != AF_INET)
+        return false;
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    if (::inet_pton(AF_INET, addr, &sa.sin_addr) != 1)
+        return false;
+    return ::bind(fd, reinterpret_cast<sockaddr *>(&sa), sizeof(sa)) == 0;
+}
+
 Socket connectTcp(const std::string &host, uint16_t port, int timeoutMs, std::string *err)
 {
     addrinfo hints{};
@@ -65,6 +86,10 @@ Socket connectTcp(const std::string &host, uint16_t port, int timeoutMs, std::st
         const int fd = ::socket(a->ai_family, a->ai_socktype, a->ai_protocol);
         if (fd < 0)
             continue;
+        if (!bindForTest(fd, a->ai_family)) {
+            ::close(fd);
+            continue;
+        }
 
         setNonBlocking(Socket(fd));
         int rcConnect = ::connect(fd, a->ai_addr, a->ai_addrlen);
@@ -207,14 +232,26 @@ std::vector<std::string> systemRootCertificates()
 
 File fileOpenRead(const std::string &path)
 {
-    const int fd = ::open(path.c_str(), O_RDONLY);
+    int fd;
+    do {
+        fd = ::open(path.c_str(), O_RDONLY);
+    } while (fd < 0 && errno == EINTR);
     return fd < 0 ? kInvalidFile : File(fd);
 }
 
 File fileOpenReadWrite(const std::string &path)
 {
-    const int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0600);
+    int fd;
+    do {
+        fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0600);
+    } while (fd < 0 && errno == EINTR);
     return fd < 0 ? kInvalidFile : File(fd);
+}
+
+std::string lastFileError()
+{
+    const int e = errno;
+    return std::string(std::strerror(e)) + " (errno " + std::to_string(e) + ")";
 }
 
 void fileClose(File f)
@@ -225,12 +262,43 @@ void fileClose(File f)
 
 int64_t fileReadAt(File f, void *buf, size_t len, uint64_t offset)
 {
-    return ::pread(int(f), buf, len, off_t(offset));
+    auto *out = static_cast<uint8_t *>(buf);
+    size_t done = 0;
+    int retries = 0;
+    while (done < len) {
+        const ssize_t n = ::pread(int(f), out + done, len - done, off_t(offset + done));
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            if (errno == EAGAIN && retries++ < 10) {
+                sleepMs(50 * retries);
+                continue;
+            }
+            return -1;
+        }
+        if (n == 0)
+            break;   // конец файла
+        done += size_t(n);
+    }
+    return int64_t(done);
 }
 
 int64_t fileWriteAt(File f, const void *buf, size_t len, uint64_t offset)
 {
-    return ::pwrite(int(f), buf, len, off_t(offset));
+    const auto *in = static_cast<const uint8_t *>(buf);
+    size_t done = 0;
+    while (done < len) {
+        const ssize_t n = ::pwrite(int(f), in + done, len - done, off_t(offset + done));
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (n == 0)
+            return -1;
+        done += size_t(n);
+    }
+    return int64_t(done);
 }
 
 bool fileTruncate(File f, uint64_t size)
