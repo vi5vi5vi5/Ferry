@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cwchar>
 #include <cwctype>
 
@@ -752,6 +753,42 @@ bool consoleIsTty()
 bool consoleStdinIsTty()
 {
     return ::_isatty(::_fileno(stdin)) != 0;
+}
+
+bool copyToClipboard(const std::string &text)
+{
+    const std::wstring wide = toWide(text);
+    const size_t size = (wide.size() + 1) * sizeof(wchar_t);
+    HGLOBAL mem = ::GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!mem)
+        return false;
+    void *p = ::GlobalLock(mem);
+    if (!p) {
+        ::GlobalFree(mem);
+        return false;
+    }
+    std::memcpy(p, wide.c_str(), size);
+    ::GlobalUnlock(mem);
+
+    // Буфер может держать другая программа — пара попыток, не больше:
+    // ссылка и так напечатана, ждать ради удобства нечего.
+    bool opened = false;
+    for (int i = 0; i < 5 && !opened; ++i) {
+        opened = ::OpenClipboard(nullptr) != 0;
+        if (!opened)
+            ::Sleep(20);
+    }
+    if (!opened) {
+        ::GlobalFree(mem);
+        return false;
+    }
+    ::EmptyClipboard();
+    // После удачного SetClipboardData память принадлежит системе.
+    const bool ok = ::SetClipboardData(CF_UNICODETEXT, mem) != nullptr;
+    ::CloseClipboard();
+    if (!ok)
+        ::GlobalFree(mem);
+    return ok;
 }
 
 int consoleWidth()

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <string>
 
 #include "Cli/ui/Term.h"
 
@@ -16,10 +17,10 @@ int64_t nowMs()
 // Как часто печатать строку состояния, когда вывод не в терминал.
 constexpr int64_t kPlainIntervalMs = 15000;
 
-// Как часто перерисовывать панель в терминале. Сто миллисекунд — это
-// десять кадров в секунду: глазу достаточно, а главному циклу остаётся
-// заниматься своим делом.
-constexpr int64_t kDrawIntervalMs = 100;
+// Как часто перерисовывать панель в терминале. Полсекунды — ровно так
+// часто обновляется скорость. Десять кадров в секунду были плавнее, но
+// карта и счётчики на них рябили.
+constexpr int64_t kDrawIntervalMs = 500;
 
 } // namespace
 
@@ -54,20 +55,33 @@ void LivePanel::update(const std::vector<std::string> &lines)
 
 void LivePanel::draw(const std::vector<std::string> &lines)
 {
+    // Кадр собирается целиком и уходит одной записью. По printf на строку
+    // терминал успевал показать стёртую строку до того, как приходила
+    // новая, — отсюда и мигание.
+    std::string out;
+
+    // Синхронный вывод (DEC 2026): терминал, который его знает, покажет
+    // кадр целиком, а не на середине. Кто не знает — молча пропускает.
+    out += "\033[?2026h";
     if (!m_cursorHidden) {
-        std::printf("\033[?25l");   // курсор мешает читать перерисовку
+        out += "\033[?25l";   // курсор мешает читать перерисовку
         m_cursorHidden = true;
     }
 
     // Возвращаемся ровно на столько строк, сколько напечатали прошлый раз.
-    // Каждую гасим целиком (\033[2K), а не затираем пробелами: строка
-    // могла быть длиннее нынешней, и хвост остался бы висеть.
     if (m_printed > 0)
-        std::printf("\033[%dA", m_printed);
+        out += "\033[" + std::to_string(m_printed) + "A";
 
+    // Строку, которая не изменилась, не трогаем вовсе — перевод строки
+    // просто опускает курсор. Изменившуюся гасим целиком (\033[2K), а не
+    // затираем пробелами: она могла быть длиннее нынешней, и хвост остался
+    // бы висеть.
     int drawn = 0;
     for (const std::string &line : lines) {
-        std::printf("\033[2K%s\n", line.c_str());
+        if (size_t(drawn) < m_shown.size() && m_shown[size_t(drawn)] == line)
+            out += "\n";
+        else
+            out += "\r\033[2K" + line + "\n";
         ++drawn;
     }
     // Панель стала короче — гасим то, что осталось от прошлой. Строки не
@@ -75,13 +89,18 @@ void LivePanel::draw(const std::vector<std::string> &lines)
     // столько строк ниже верха панели, сколько мы помним в m_printed,
     // иначе следующий подъём уедет не туда.
     while (drawn < m_printed) {
-        std::printf("\033[2K\n");
+        out += "\r\033[2K\n";
         ++drawn;
     }
+    out += "\033[?2026l";
 
+    std::fwrite(out.data(), 1, out.size(), stdout);
+    std::fflush(stdout);
+
+    m_shown = lines;
+    m_shown.resize(size_t(drawn));
     m_printed = drawn;
     m_dirty = false;
-    std::fflush(stdout);
 }
 
 void LivePanel::finish()
@@ -109,4 +128,5 @@ void LivePanel::finish()
     }
     std::fflush(stdout);
     m_printed = 0;
+    m_shown.clear();
 }

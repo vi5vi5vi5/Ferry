@@ -436,6 +436,11 @@ bool consoleStdinIsTty()
     return ::isatty(STDIN_FILENO) == 1;
 }
 
+bool copyToClipboard(const std::string &)
+{
+    return false;
+}
+
 int consoleWidth()
 {
     winsize ws{};

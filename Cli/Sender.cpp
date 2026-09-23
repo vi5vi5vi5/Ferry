@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -473,7 +474,11 @@ int runSend(const Options &options, const Relay &relay)
     std::printf("%s%s%s\n", dim(), ruleBottom(cells).c_str(), reset());
 
     std::printf("\nЗабрать:  %sferry get \"%s\"%s\n", bold(), linkText.c_str(), reset());
-    if (!options.noQr) {
+    // В буфер — только когда рядом человек. Скрипту, который перенаправил
+    // вывод, чужой буфер обмена трогать незачем.
+    if (isTty() && platform::copyToClipboard(linkText))
+        std::printf("%sСсылка уже в буфере обмена.%s\n", dim(), reset());
+    if (options.qr) {
         std::printf("\n");
         if (!printQr(linkText))
             std::printf("%s  (QR не поместился или вывод не в терминал)%s\n", dim(), reset());
@@ -488,8 +493,17 @@ int runSend(const Options &options, const Relay &relay)
         std::printf("\n");
     }
 
-    std::printf("\n%sРаздача идёт, пока запущена эта команда. На сервере, куда вы зашли по ssh,\n"
-                "её стоит запускать в tmux:  tmux new -s ferry%s\n\n", dim(), reset());
+    // Раздача живёт, пока жива команда, а ssh-сессия уносит её с собой.
+    // Подсказка нужна ровно там — зашли по ssh и ещё не в tmux или screen;
+    // на своём компьютере она только шум. И сразу целиком, с клавишами:
+    // «tmux new "ferry send …"» закрывает окно вместе с ошибкой, и кроме
+    // [exited] человек ничего не видит.
+    if (std::getenv("SSH_CONNECTION") && !std::getenv("TMUX") && !std::getenv("STY"))
+        std::printf("\n%sРаздача идёт, пока запущена эта команда, и закроется вместе с ssh.\n"
+                    "Чтобы не зависеть от сессии: tmux new -s ferry, там ferry send,\n"
+                    "потом Ctrl-B и D. Вернуться — tmux attach -t ferry.%s\n",
+                    dim(), reset());
+    std::printf("\n");
 
     // ---- 7. Качаем ----
     ChunkPump pump;

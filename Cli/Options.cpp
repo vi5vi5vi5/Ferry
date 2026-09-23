@@ -134,8 +134,10 @@ Options Options::parse(const std::vector<std::string> &args)
             o.relay = need("адрес релея");
         else if (arg == "--insecure" || arg == "-k")
             o.insecure = true;
+        else if (arg == "--qr")
+            o.qr = true;
         else if (arg == "--no-qr")
-            o.noQr = true;
+            o.qr = false;   // было умолчание наоборот; старые скрипты не ломаем
         else if (arg == "--name")
             o.name = need("имя");
         else if (arg == "--uses")
@@ -200,7 +202,7 @@ void printHelp()
     std::printf("  --uses <N>            сколько раз ссылкой можно воспользоваться\n");
     std::printf("  --ttl <срок>          сколько живёт раздача: 90m, 24h, 7d\n");
     std::printf("  --max-concurrent <N>  сколько получателей одновременно\n");
-    std::printf("  --no-qr               не печатать QR\n\n");
+    std::printf("  --qr                  напечатать QR ссылки — для телефона\n\n");
     std::printf("Ключи get:\n");
     std::printf("  -o, --output <путь>   куда положить\n");
     std::printf("  --id <id> --key <ключ>  если ссылка потеряла часть после решётки\n");

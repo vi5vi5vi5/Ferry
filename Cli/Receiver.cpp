@@ -1219,6 +1219,7 @@ int runGet(const Options &options)
                 break;
             serveQueue.clear(give);
             if (!pump.send(ws, give)) {
+                seedPanel.finish();   // сообщение — под панелью, а не поверх
                 std::fprintf(stderr, "\n%s\n", pump.error().c_str());
                 serveQueue.reset(plan.chunkCount);
                 break;

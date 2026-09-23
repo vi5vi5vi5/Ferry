@@ -21,7 +21,7 @@ struct Options
     // Общее
     std::string relay;          // "ferry.example.ru" или "https://ferry.example.ru:8443"
     bool insecure = false;      // не проверять сертификат (см. предупреждение в выводе)
-    bool noQr = false;
+    bool qr = false;            // QR ссылки: по умолчанию нет, место на экране дороже
     std::string name;           // как представиться: видно только отправителю
 
     // send
