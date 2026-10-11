@@ -13,65 +13,10 @@ import { openVolume } from './volume.js';
 import { summarize } from './manifest.js';
 import { readSavedState, sweepOld, MEMORY_LIMIT } from './store.js';
 import { b64urlDecode } from './b64.js';
+import { NB, grp, comma, plural, unitOf, inUnit, unitName, size, dur, pct, files, dirs, chunks, copy } from './ui.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
-
-// ---------------------------------------------------------------- формат
-
-const NB = ' ';
-const UNITS = ['Б', 'КиБ', 'МиБ', 'ГиБ', 'ТиБ', 'ПиБ'];
-
-const grp = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, NB);
-const comma = (x, d) => x.toFixed(d).replace('.', ',');
-
-function plural(n, one, few, many) {
-    const a = n % 10;
-    const b = n % 100;
-    if (a === 1 && b !== 11)
-        return one;
-    if (a >= 2 && a <= 4 && (b < 12 || b > 14))
-        return few;
-    return many;
-}
-
-function unitOf(bytes) {
-    let i = 0;
-    let v = bytes;
-    while (v >= 1024 && i < UNITS.length - 1) {
-        v /= 1024;
-        i++;
-    }
-    return i;
-}
-
-function inUnit(bytes, u) {
-    const v = bytes / 1024 ** u;
-    return u === 0 ? grp(v) : comma(v, v >= 100 ? 0 : 1);
-}
-
-const size = (bytes) => {
-    const u = unitOf(bytes);
-    return inUnit(bytes, u) + NB + UNITS[u];
-};
-
-function dur(ms) {
-    const s = Math.max(0, Math.round(ms / 1000));
-    if (s < 60)
-        return `${s}${NB}с`;
-    const m = Math.floor(s / 60);
-    if (m < 60)
-        return `${m}${NB}мин ${String(s % 60).padStart(2, '0')}${NB}с`;
-    const h = Math.floor(m / 60);
-    if (h < 48)
-        return `${h}${NB}ч ${String(m % 60).padStart(2, '0')}${NB}мин`;
-    return `${Math.floor(h / 24)}${NB}дн ${h % 24}${NB}ч`;
-}
-
-const pct = (x) => `${(Math.max(0, Math.min(1, x)) * 100).toFixed(2)}%`;
-const files = (n) => `${grp(n)} ${plural(n, 'файл', 'файла', 'файлов')}`;
-const dirs = (n) => `${grp(n)} ${plural(n, 'папка', 'папки', 'папок')}`;
-const chunks = (n) => `${grp(n)} ${plural(n, 'чанк', 'чанка', 'чанков')}`;
 
 function popcount(bytes) {
     let n = 0;
@@ -169,26 +114,6 @@ function fileRow(n, path, sizeText, state, cls = 'frow') {
     return row;
 }
 
-async function copy(text, btn) {
-    try {
-        await navigator.clipboard.writeText(text);
-    } catch {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        document.body.append(ta);
-        ta.select();
-        document.execCommand('copy');
-        ta.remove();
-    }
-    if (btn) {
-        const was = btn.textContent;
-        btn.textContent = 'Скопировано';
-        setTimeout(() => {
-            btn.textContent = was;
-        }, 1500);
-    }
-}
-
 function remember(key, value) {
     try {
         if (value === undefined)
@@ -270,7 +195,7 @@ const ERRORS = {
     need_key: {
         pic: 'key', tone: 'warn', tag: 'ключ не предъявлен', title: 'Ссылка неполная',
         text: 'В ссылке нет части после решётки — а это и есть ключ. Сервер ключа не знает и расшифровать том не может. Использование раздачи при этом не списано: страница без ключа к раздаче даже не подключалась.',
-        exit: 'Скопируйте ссылку целиком, вместе с частью после #', act: ['link'],
+        exit: 'Вставьте ссылку целиком или ключ, если его прислали отдельно', act: ['link'],
     },
     bad_key: {
         pic: 'key', tone: 'warn', tag: 'ключ не подошёл', title: 'Ключ в ссылке не подходит',
@@ -964,7 +889,7 @@ function paintScene(snap) {
             const node = tpl.content.firstElementChild.cloneNode(true);
             node.style.left = pct(i / 7);
             node.querySelector('[data-t="label"]').textContent = i === 0 ? '0'
-                : inUnit((total * i) / 7, u) + (i === 7 ? NB + UNITS[u] : '');
+                : inUnit((total * i) / 7, u) + (i === 7 ? NB + unitName(u) : '');
             list.append(node);
         }
         list.dataset.ready = '1';
@@ -1010,7 +935,7 @@ function initRx() {
     // экране прячем каждую вторую — оставшиеся стоят на своих местах.
     ticks.replaceChildren(...Array.from({ length: 7 }, (_, i) => {
         const s = document.createElement('span');
-        s.textContent = i === 0 ? '0' : inUnit((total * i) / 6, u) + NB + UNITS[u];
+        s.textContent = i === 0 ? '0' : inUnit((total * i) / 6, u) + NB + unitName(u);
         if (i % 2)
             s.className = 'hide-sm';
         return s;
@@ -1533,9 +1458,16 @@ function wire() {
     $('#err-link').addEventListener('submit', (e) => {
         e.preventDefault();
         const v = $('#err-link-in').value.trim();
+        // Ключ могли прислать отдельно от ссылки — тогда вставляют только
+        // его: 43 знака base64url, те самые, что стоят после #.
+        if (S.link && /^#?[A-Za-z0-9_-]{43}$/.test(v)) {
+            location.hash = v.replace(/^#/, '');
+            location.reload();
+            return;
+        }
         const l = parseLink(v);
         if (!l || !l.key) {
-            $('#err-link-in').setCustomValidity('Нужна ссылка Ferry целиком — с частью после #');
+            $('#err-link-in').setCustomValidity('Нужна ссылка Ferry целиком — с частью после # — или сам ключ');
             $('#err-link-in').reportValidity();
             return;
         }

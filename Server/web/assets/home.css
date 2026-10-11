@@ -1,0 +1,198 @@
+/* ============================================================
+   Ferry — главная и накладная раздачи.
+
+   Токены, кнопки, лист накладной и анимации моря — в ferry.css, общем
+   со страницей приёма. Здесь то, что есть только у отправителя: сцена
+   главной («Ferry · Main»), карточка погрузки с условиями выдачи и
+   карта переправы с живыми маршрутами («Sender»).
+   ============================================================ */
+
+.home { min-height: 100vh; background: var(--surface-000); color: var(--ink-100); font-family: var(--font-sans);
+    overflow-x: hidden; }
+.home section[id], .home [id="top"] { scroll-margin-top: 16px; }
+
+/* ---- анимации макета Main ---- */
+.fx-ants { --ant: var(--line-200);
+    background-image: linear-gradient(90deg, var(--ant) 50%, transparent 50%), linear-gradient(90deg, var(--ant) 50%, transparent 50%),
+        linear-gradient(0deg, var(--ant) 50%, transparent 50%), linear-gradient(0deg, var(--ant) 50%, transparent 50%);
+    background-repeat: repeat-x, repeat-x, repeat-y, repeat-y;
+    background-size: 14px 1.5px, 14px 1.5px, 1.5px 14px, 1.5px 14px;
+    background-position: 0 0, 0 100%, 0 0, 100% 0;
+    animation: fx-ants 1.4s linear infinite; transition: background-color 120ms linear; }
+@keyframes fx-ants { to { background-position: 14px 0, -14px 100%, 0 -14px, 100% 14px; } }
+.fx-ants:hover, .fx-ants.is-over { --ant: var(--signal); background-color: var(--signal-muted) !important; }
+.fx-sail { animation: fx-sail 84s linear infinite; animation-delay: -30s; }
+@keyframes fx-sail { from { left: -340px; } to { left: calc(100% + 80px); } }
+.fx-sail-rev { animation: fx-sail-rev 150s linear infinite; animation-delay: -60s; }
+@keyframes fx-sail-rev { from { left: calc(100% + 40px); } to { left: -120px; } }
+.fx-hook { animation: fx-hook 3.6s ease-in-out infinite; }
+@keyframes fx-hook { 0%, 100% { transform: translateY(-5px); } 50% { transform: translateY(5px); } }
+.fx-route-boat { animation: fx-route 18s linear infinite; }
+@keyframes fx-route { from { left: 0%; } to { left: 100%; } }
+.fx-p2p { animation: fx-p2p 7s linear infinite; transform-origin: left center; }
+@keyframes fx-p2p { 0% { transform: scaleX(0); } 80%, 100% { transform: scaleX(.25); } }
+.fx-fer { animation: fx-fer 7s linear infinite; transform-origin: left center; }
+@keyframes fx-fer { 0% { transform: scaleX(0); } 80%, 100% { transform: scaleX(1); } }
+.fx-dash { animation: fx-dash 1.2s linear infinite; }
+@keyframes fx-dash { to { stroke-dashoffset: -16; } }
+.fx-link { color: var(--ink-200); text-decoration: none; transition: color 120ms linear; }
+.fx-link:hover { color: var(--ink-100); }
+
+/* ---- шапка ---- */
+.relay-pill { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid var(--line-100);
+    border-radius: 4px; background: rgba(18, 26, 33, 0.7); font: var(--text-mono-s); color: var(--ink-200);
+    text-decoration: none; white-space: nowrap; }
+.relay-pill:hover { color: var(--ink-100); border-color: var(--line-200); }
+.relay-pill i { width: 8px; height: 8px; border-radius: 50%; background: var(--wait); flex-shrink: 0; }
+.relay-pill.ok i { background: var(--ok); }
+.relay-pill.bad i { background: var(--danger); }
+
+/* ---- карточка погрузки ---- */
+.load-body { padding: 20px; display: flex; flex-direction: column; gap: 20px; }
+.load-tag { display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px; border: 1px solid var(--wait);
+    font: var(--text-mono-s); font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-200);
+    transform: rotate(-2deg); white-space: nowrap; }
+.load-tag i { width: 6px; height: 6px; border-radius: 50%; background: var(--wait); }
+.load-card[data-state="cargo"] .load-tag { border-color: var(--signal); color: var(--signal-text); }
+.load-card[data-state="cargo"] .load-tag i { background: var(--signal); animation: none; }
+.drop .btn { min-height: 44px; }
+.load-note { margin: -8px 0 0; padding: 10px 12px; border: 1px solid var(--warn); border-radius: 4px;
+    background: rgba(229, 163, 42, 0.08); font: var(--text-caption); color: var(--ink-100); }
+.busy { display: flex; align-items: center; gap: 12px; min-height: 120px; justify-content: center;
+    font: var(--text-body); color: var(--ink-200); }
+.cargo-name { margin: 0; font: var(--text-display-m); letter-spacing: -0.01em; color: var(--ink-100); overflow-wrap: anywhere; }
+.load-body .banner { padding: 12px 14px; gap: 8px; }
+.load-body .banner p { flex-basis: 100%; }
+.skipped > summary { min-height: 32px; font: var(--text-caption); font-weight: 600; }
+.skipped .files--all { max-height: 200px; }
+.skipped .frow { grid-template-columns: minmax(0, 1fr) minmax(0, auto); }
+.skipped .frow .s { display: block; text-align: right; color: var(--warn-text); }
+.pol { display: flex; flex-direction: column; gap: 8px; }
+
+/* Переключатель на две-три позиции — как вкладки Linux/Windows в макете. */
+.seg, .ostabs { display: inline-flex; align-self: flex-start; max-width: 100%; border: 1px solid var(--line-200);
+    border-radius: 4px; overflow: hidden; }
+.seg button, .ostabs button { font: var(--text-mono-s); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 10px 14px; min-height: 40px; border: 0; border-left: 1px solid var(--line-200); background: transparent;
+    color: var(--ink-200); cursor: pointer; white-space: nowrap; transition: background 120ms linear, color 120ms linear; }
+.seg button:first-child, .ostabs button:first-child { border-left: 0; }
+.seg button:hover, .ostabs button:hover { color: var(--ink-100); }
+.seg button[aria-pressed="true"], .ostabs button[aria-pressed="true"] { background: var(--ink-100); color: var(--surface-000); }
+.ostabs button { letter-spacing: 0.08em; padding: 10px 16px; }
+.btn-sm { font: var(--text-caption); font-weight: 600; padding: 6px 12px; min-height: 32px; white-space: nowrap; }
+
+/* ---- накладная раздачи ---- */
+.send { background: var(--surface-000); }
+.sx-map-box { background: radial-gradient(70% 80% at 50% 50%, #111b23 0%, #0d151b 70%, #0b1015 100%); }
+.fx-flow { animation: fx-flow 1s linear infinite; }
+.fx-flow-slow { animation: fx-flow 1.8s linear infinite; }
+@keyframes fx-flow { to { stroke-dashoffset: -24; } }
+.sx-idle .fx-flow { animation: none; opacity: .35; }
+.fx-sweep { animation: fx-sweep 9s linear infinite; transform-box: view-box; transform-origin: 800px 300px; }
+@keyframes fx-sweep { to { transform: rotate(360deg); } }
+.sx-ping { animation: sx-ping 3s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+@keyframes sx-ping { 0% { transform: scale(.4); opacity: .7; } 100% { transform: scale(2.4); opacity: 0; } }
+.sx-boat { position: absolute; width: 0; height: 0; transition: left 1s linear, top 1s linear; }
+.sx-boat .hull { position: absolute; left: -24px; top: -20px; width: 48px; height: 24px; transition: transform 1s linear; }
+.sx-boat .hull svg { display: block; animation: sx-bob 4.4s ease-in-out infinite; }
+@keyframes sx-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+.sx-boat .tag { position: absolute; left: 0; top: 10px; transform: translateX(-50%); padding: 1px 6px;
+    background: rgba(11, 16, 21, 0.85); border: 1px solid var(--line-100); font: var(--text-mono-s); color: var(--ink-100);
+    white-space: nowrap; }
+.sx-boat.seed .tag { border-color: var(--seed); color: var(--seed-text); }
+.sx-who { position: absolute; right: 1%; display: flex; flex-direction: column;
+    align-items: flex-end; gap: 4px; max-width: 9.5%; text-align: right; }
+.sx-who b { font: var(--text-body-strong); color: var(--ink-100); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 100%; }
+.sx-who .role { font: var(--text-mono-s); }
+.sx-wait { position: absolute; right: 1%; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column;
+    align-items: flex-end; gap: 4px; text-align: right; font: var(--text-caption); color: var(--ink-300); max-width: 12%; }
+.sx-wait b { font: var(--text-body-strong); color: var(--ink-200); }
+
+.sx-sheet { margin-top: -36px; }
+.sx-two { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 44px; }
+.sx-prep { display: flex; gap: 14px; align-items: flex-start; padding: 16px; background: var(--surface-200);
+    border: 1px solid var(--line-100); border-radius: 4px; }
+.sx-prep .fx-ring { flex-shrink: 0; margin-top: 2px; }
+.sx-link-row { display: flex; gap: 24px; align-items: center; }
+.sx-link { margin: 0; font: var(--text-mono-l); color: var(--ink-100); word-break: break-all; }
+.sx-link .k { color: var(--signal-text); }
+.sx-split { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line-100); border-radius: 4px;
+    background: var(--surface-200); }
+.sx-keyrow { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.sx-keyrow code { font: var(--text-mono-m); color: var(--signal-text); word-break: break-all; flex: 1 1 200px; }
+.sx-qr { flex-shrink: 0; position: relative; width: 196px; height: 196px; border-radius: 22px;
+    background: linear-gradient(145deg, #7e93a2 0%, #3d505c 45%, #22303a 100%);
+    box-shadow: inset 0 0 0 1px #a8b7c2, inset 0 0 0 9px #2a3a46; display: flex; align-items: center; justify-content: center; }
+.sx-qr > i { position: absolute; width: 6px; height: 6px; border-radius: 50%; background: #a8b7c2; }
+/* Код читают камерой: тёмные модули на светлом поле, как ждёт любой сканер. */
+.sx-qr-ground { width: 156px; height: 156px; border-radius: 14px; background: #f4f7f9; display: flex; align-items: center;
+    justify-content: center; }
+.sx-rate { font: var(--text-display-l); font-family: var(--font-mono); letter-spacing: -0.02em; font-variant-numeric: tabular-nums;
+    color: var(--ink-100); }
+.sx-trow { display: grid; grid-template-columns: 120px minmax(0, 1fr) 64px 110px 110px 150px; gap: 16px; align-items: center;
+    min-height: 44px; border-bottom: 1px solid var(--line-100); }
+.sx-trow .r { text-align: right; }
+.sx-trow--head { min-height: 0; padding: 6px 0; border-bottom-color: var(--line-200); font: var(--text-mono-s);
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-300); }
+.sx-trow .who { font: var(--text-body-strong); color: var(--ink-100); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sx-trow .num { font: var(--text-mono-num); color: var(--ink-100); text-align: right; white-space: nowrap; }
+.sx-trow .num.dim { color: var(--ink-200); }
+.sx-trow .rl { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; font: var(--text-caption);
+    color: var(--ink-200); white-space: nowrap; }
+.sx-trow .rl i { width: 8px; height: 8px; border-radius: 2px; background: var(--wait); flex-shrink: 0; }
+.sx-trow .rl.catching i { background: var(--chunk-inflight); }
+.sx-trow .rl.seed { color: var(--seed-text); }
+.sx-trow .rl.seed i { background: var(--seed); }
+.sx-lane { position: relative; height: 6px; background: var(--surface-300); }
+.sx-lane i { position: absolute; top: 0; left: 0; height: 6px; background: var(--chunk-have); transition: width 1s linear; }
+.sx-lane.catching i, .sx-lane.seed i { background: var(--chunk-peer); }
+.sx-lane svg { position: absolute; top: -10px; transform: translateX(-80%); transition: left 1s linear; }
+.sx-empty { padding: 12px 0; }
+.sx-map-wrap { padding-top: 32px; }
+.sx-cur { position: absolute; top: 0; display: flex; flex-direction: column; align-items: center; transform: translateX(-50%);
+    transition: left 1s linear; }
+.sx-cur span { padding: 1px 6px; border: 1px solid var(--line-200); background: var(--surface-100); font: var(--text-mono-s);
+    color: var(--ink-100); white-space: nowrap; }
+.sx-cur i { width: 2px; height: 8px; background: var(--line-200); }
+.sx-cur.l { align-items: flex-start; transform: none; }
+.sx-cur.r { align-items: flex-end; transform: translateX(-100%); }
+.sx-cond { font: var(--text-mono-num); color: var(--ink-100); }
+.sx-cond .u { color: var(--ink-300); }
+.sx-confirm { align-items: center; }
+/* Закрытая раздача: ссылка остаётся для памяти, но копировать её и
+   показывать QR незачем — она больше не открывается. */
+.sx-ended #sx-linkbox .btns, .sx-ended .sx-qr, .sx-ended #sx-split { display: none; }
+.sx-ended .sx-link { opacity: .45; text-decoration: line-through; text-decoration-thickness: 1px; }
+
+@media (max-width: 900px) {
+    .fx-hero-grid { grid-template-columns: minmax(0, 1fr) !important; padding: 28px 20px 300px !important; gap: 36px !important; }
+    .fx-h1 { font-size: 46px !important; line-height: 48px !important; }
+    .fx-nav-links { display: none !important; }
+    .home nav { padding: 20px !important; }
+    .fx-wrap { padding-left: 20px !important; padding-right: 20px !important; }
+    .fx-two { grid-template-columns: minmax(0, 1fr) !important; }
+    .fx-steps { grid-template-columns: minmax(0, 1fr) !important; }
+    .fx-route { display: none !important; }
+    .fx-port { transform: scale(.6); transform-origin: left bottom; }
+    .fx-light { transform: scale(.7); transform-origin: right bottom; }
+    .fx-statement { font-size: 30px !important; line-height: 36px !important; }
+    .load-body { padding: 16px; }
+    .fx-foot-grow { display: none; }
+
+    /* Карта переправы на телефоне — заставка, а не прибор: подписи и
+       суда переезжают в таблицу получателей ниже. */
+    .sx-legend, .sx-lab, .sx-who, .sx-wait, .sx-boat .tag { display: none !important; }
+    .sx-sheet { margin-top: -12px; }
+    .sx-two { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+    .sx-link-row { flex-direction: column; align-items: flex-start; }
+    .sx-link { font-size: 17px; line-height: 24px; }
+    .sx-trow { grid-template-columns: 84px minmax(0, 1fr) 52px 108px; gap: 10px; }
+}
+@media (max-width: 520px) {
+    .fx-moon { display: none; }
+    .seg button { padding: 10px 10px; letter-spacing: 0.02em; }
+    .sx-trow { grid-template-columns: minmax(0, 1fr) 52px 100px; }
+    .sx-trow .lane-cell { display: none; }
+    .sx-rate { font-size: 36px; line-height: 40px; }
+}

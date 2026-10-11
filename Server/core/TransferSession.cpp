@@ -1090,6 +1090,14 @@ QJsonObject TransferSession::peersJson() const
         else if (nextMissing(r, 0) < r->cursor())
             role = QStringLiteral("catching");
         o[QStringLiteral("role")] = role;
+        // Откуда этот получатель брал чанки — в штуках, а не в долях:
+        // отправитель складывает их по всем получателям, и доли от разных
+        // знаменателей сложить было бы нельзя.
+        QJsonObject src;
+        src[QStringLiteral("window")] = double(r->fromWindow());
+        src[QStringLiteral("peers")] = double(r->fromPeers());
+        src[QStringLiteral("sender")] = double(r->fromSender());
+        o[QStringLiteral("src")] = src;
         arr.append(o);
     }
     QJsonObject o;

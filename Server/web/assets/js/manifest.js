@@ -6,7 +6,7 @@
 // целиком, а не чинится. Разойдись эта копия с C++ хоть на байт в
 // раскладке — хеши сойдутся, а файлы окажутся склеены со сдвигом.
 
-import { b64urlDecode } from './b64.js';
+import { b64urlDecode, b64urlEncode } from './b64.js';
 
 const MAX_ENTRIES = 100000;
 const MAX_NAME_BYTES = 1024;
@@ -181,6 +181,53 @@ export function parseManifest(text) {
             throw new ManifestError('сумма размеров описи не сходится с размером тома');
     }
     return m;
+}
+
+// Обратная сторона parseManifest — для отправителя. Поля и их порядок те
+// же, что у Manifest::toJson в ядре: root === null означает промежуточный
+// манифест раздачи с хешами на лету.
+export function manifestToJson(m, root) {
+    const o = { v: 1, kind: m.kind, name: m.name, total: m.total };
+    if (root)
+        o.root = b64urlEncode(root);
+    else
+        o.hashes = 'stream';
+    if (m.kind === 'tree') {
+        o.entries = m.entries.map((e) => {
+            const item = { p: e.path, s: e.size };
+            if (e.mtime)
+                item.m = e.mtime;
+            if (e.isDir)
+                item.d = true;
+            return item;
+        });
+    }
+    return JSON.stringify(o);
+}
+
+// Порядок описи — побайтовое сравнение путей в UTF-8, как std::string в
+// ядре. Сравнение строк JavaScript идёт по UTF-16 и расходится с ним на
+// символах за пределами BMP.
+export function comparePaths(a, b) {
+    const x = enc.encode(a);
+    const y = enc.encode(b);
+    const n = Math.min(x.length, y.length);
+    for (let i = 0; i < n; i++)
+        if (x[i] !== y[i])
+            return x[i] - y[i];
+    return x.length - y.length;
+}
+
+export const LIMITS = { entries: MAX_ENTRIES, nameBytes: MAX_NAME_BYTES, pathBytes: MAX_PATH_BYTES };
+
+// Размер чанка по размеру тома — как chooseChunkSize в ядре.
+export function chunkSizeFor(total) {
+    const MiB = 1024 * 1024;
+    if (total < 64 * MiB)
+        return 256 * 1024;
+    if (total <= 4096 * MiB)
+        return MiB;
+    return 4 * MiB;
 }
 
 // Описывают ли два манифеста один и тот же том, если не смотреть на

@@ -58,6 +58,13 @@ export async function deriveKeys(master) {
     return keys;
 }
 
+// V в открытом виде — его отправитель кладёт в offer. Получателю он не
+// нужен: тот только подписывает им challenge, и ключ остаётся
+// неизвлекаемым.
+export async function verifierBytes(master) {
+    return hkdf(master, 'ferry/v1/verifier');
+}
+
 // Ответ на challenge: HMAC-SHA256(V, challenge). Сервер знает V и может
 // проверить, но вернуться от V к K не может.
 export async function proveKeyOwnership(keys, challenge) {

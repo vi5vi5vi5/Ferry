@@ -110,6 +110,34 @@ export async function fetchMeta(origin, id) {
     return meta;
 }
 
+// Завести раздачу. Черновик живёт минуту: за это время отправитель обязан
+// дойти до WebSocket и прислать offer.
+export async function createTransfer(origin) {
+    let resp;
+    try {
+        resp = await fetch(`${origin}/api/transfers`, {
+            method: 'POST',
+            cache: 'no-store',
+            credentials: 'omit',
+        });
+    } catch {
+        throw new RelayError('network', 'сервер не отвечает');
+    }
+    if (!resp.ok) {
+        const code = await readError(resp);
+        throw new RelayError(code || `http_${resp.status}`);
+    }
+    const v = await resp.json();
+    if (!isValidTransferId(v.id) || typeof v.owner_token !== 'string')
+        throw new RelayError('bad_reply', 'сервер ответил не тем');
+    return {
+        id: v.id,
+        ownerToken: v.owner_token,
+        publicUrl: typeof v.public_url === 'string' ? v.public_url.replace(/\/+$/, '') : '',
+        features: Array.isArray(v.features) ? v.features : [],
+    };
+}
+
 // Challenge одноразовый и живёт две минуты, поэтому берётся прямо перед
 // подключением, а не заранее.
 export async function fetchChallenge(origin, id) {
