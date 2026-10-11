@@ -1,141 +1,656 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ferry — раздача</title>
-<style>
-:root {
-  --bg: #fbfaf8; --ink: #1a1a18; --ink-2: #5a5a54; --line: #ddd9d2;
-  --accent: #0f5c68; --code-bg: #f2efe9; --warn: #8a5a00;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #14150f; --ink: #e8e6df; --ink-2: #9a978c; --line: #2e2f28;
-    --accent: #6fb6c2; --code-bg: #1d1e17; --warn: #d6a44a;
-  }
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0; padding: 48px 16px 64px; background: var(--bg); color: var(--ink);
-  font: 16px/1.6 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-}
-main { max-width: 680px; margin: 0 auto; }
-h1 { font-size: 24px; margin: 0 0 4px; }
-.sub { color: var(--ink-2); margin: 0 0 32px; }
-h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.08em;
-     color: var(--ink-2); margin: 32px 0 10px; font-weight: 600; }
-pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px;
-      padding: 14px 16px; overflow-x: auto; margin: 0 0 10px; white-space: pre-wrap;
-      word-break: break-all;
-      font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
-button { font: inherit; font-size: 14px; padding: 7px 14px; border: 1px solid var(--line);
-         border-radius: 4px; background: transparent; color: var(--ink); cursor: pointer; }
-button:hover { border-color: var(--accent); color: var(--accent); }
-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-p { margin: 0 0 14px; }
-a { color: var(--accent); }
-.warn { color: var(--warn); }
-.note { color: var(--ink-2); font-size: 14px; }
-.meta { border: 1px solid var(--line); border-radius: 4px; padding: 0; margin: 0 0 24px; }
-.meta div { display: flex; gap: 12px; padding: 9px 16px; border-bottom: 1px solid var(--line);
-            font-size: 14px; }
-.meta div:last-child { border-bottom: 0; }
-.meta b { font-weight: 500; color: var(--ink-2); min-width: 120px; }
-.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
-</style>
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<!-- Ключ живёт в этой вкладке, поэтому ей нельзя ничего чужого: ни
+     скриптов, ни запросов в сторону. Стили в атрибутах — из макетов. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; worker-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<title>Ferry — приём тома</title>
+<link rel="icon" href="data:,">
+<!-- Сцены перенесены из макета «Ferry · ночная переправа» (Claude Design)
+     как есть. Живые значения подставляет /assets/js/app.js по атрибутам:
+     data-t — текст, data-left / data-span — положение судов и полос,
+     data-if — видно только при двух волнах. Тяжёлая работа — в воркере. -->
+<link rel="stylesheet" href="/assets/ferry.css">
+<script type="module" src="/assets/js/app.js"></script>
 </head>
 <body>
-<main>
-  <h1>Раздача Ferry</h1>
-  <p class="sub" id="state">читаю ссылку…</p>
+<div class="page" id="app">
 
-  <div class="meta" id="meta" hidden>
-    <div><b>идентификатор</b><span class="mono" id="m-id"></span></div>
-    <div><b>размер</b><span id="m-size"></span></div>
-    <div><b>чанки</b><span id="m-chunks"></span></div>
-    <div><b>состояние</b><span id="m-state"></span></div>
+<section class="fx-scene" id="rx-scene" aria-label="Переправа тома" style="position: relative; height: 440px; overflow: hidden; isolation: isolate; background: linear-gradient(180deg, #070b0e 0%, #0b1015 42%, #111c25 72%, #1a2833 100%)">
+  <svg viewBox="0 0 1440 300" preserveAspectRatio="xMidYMin slice" aria-hidden="true" style="position: absolute; left: 0; top: 0; width: 100%; height: 300px">
+    <g fill="#e8eef2" opacity=".5"><circle cx="663" cy="77" r="1.4"></circle><circle cx="1333" cy="24" r="0.7"></circle><circle cx="1097" cy="48" r="1.1"></circle><circle cx="76" cy="44" r="1.4"></circle><circle cx="856" cy="35" r="0.9"></circle><circle cx="185" cy="182" r="1.4"></circle><circle cx="101" cy="113" r="0.7"></circle><circle cx="1140" cy="68" r="1.1"></circle><circle cx="858" cy="73" r="0.7"></circle><circle cx="1169" cy="157" r="0.9"></circle><circle cx="762" cy="49" r="0.7"></circle><circle cx="1016" cy="172" r="1.4"></circle><circle cx="643" cy="138" r="1.4"></circle><circle cx="740" cy="153" r="0.9"></circle><circle cx="368" cy="124" r="0.7"></circle><circle cx="1176" cy="153" r="1.4"></circle><circle cx="1247" cy="37" r="0.7"></circle><circle cx="700" cy="77" r="1.4"></circle><circle cx="696" cy="179" r="1.4"></circle><circle cx="191" cy="138" r="1.4"></circle><circle cx="1427" cy="33" r="0.7"></circle><circle cx="582" cy="197" r="1.1"></circle><circle cx="344" cy="59" r="1.4"></circle><circle cx="264" cy="126" r="1.4"></circle><circle cx="1125" cy="142" r="0.9"></circle><circle cx="850" cy="183" r="1.4"></circle><circle cx="472" cy="77" r="0.7"></circle><circle cx="993" cy="93" r="1.1"></circle></g>
+    <g fill="#e8eef2"><circle class="fx-tw" style="animation-delay:-0.4s" cx="815" cy="104" r="1.4"></circle><circle class="fx-tw" style="animation-delay:-1.1s" cx="512" cy="46" r="1.4"></circle><circle class="fx-tw" style="animation-delay:-2.2s" cx="127" cy="97" r="1"></circle><circle class="fx-tw" style="animation-delay:-1.7s" cx="1098" cy="51" r="1.1"></circle><circle class="fx-tw" style="animation-delay:-2.6s" cx="1256" cy="13" r="0.9"></circle><circle class="fx-tw" style="animation-delay:-1.4s" cx="1299" cy="129" r="1.1"></circle><circle class="fx-tw" style="animation-delay:-0.7s" cx="251" cy="59" r="1.4"></circle><circle class="fx-tw" style="animation-delay:-2s" cx="954" cy="145" r="1.4"></circle></g>
+  </svg>
+  <div aria-hidden="true" style="position: absolute; top: 96px; left: 38%; width: 40px; height: 40px; border-radius: 50%; background: radial-gradient(circle at 36% 34%, #f6f9fa 0%, #e2e9ee 52%, #b9c6cf 100%); box-shadow: 0 0 70px 16px rgba(232, 238, 242, 0.08)"></div>
+  <div class="fx-cloud" aria-hidden="true" style="position: absolute; top: 120px; left: 0; width: 420px; height: 26px; border-radius: 50%; background: rgba(126, 147, 162, 0.07); filter: blur(6px)"></div>
+  <div class="fx-cloud" aria-hidden="true" style="animation-delay: -70s; animation-duration: 160s; position: absolute; top: 60px; left: 0; width: 300px; height: 18px; border-radius: 50%; background: rgba(126, 147, 162, 0.06); filter: blur(5px)"></div>
+  <div aria-hidden="true" style="position: absolute; left: 0; right: 0; bottom: 150px; height: 140px; background: radial-gradient(40% 100% at 12% 100%, rgba(255, 106, 31, 0.11), rgba(255, 106, 31, 0) 70%)"></div>
+
+  <div class="fx-hud" style="position: relative; z-index: 6; max-width: 1200px; margin: 0 auto; padding: 28px 40px; display: flex; align-items: flex-start; gap: 32px">
+    <div style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+      <span style="font: var(--text-mono-s); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-300)" data-t="hudEyebrow">приём тома</span>
+      <h1 style="margin: 0; font: var(--text-display-m); letter-spacing: -0.01em; color: var(--ink-100); overflow-wrap: anywhere" data-t="volName">…</h1>
+      <span style="font: var(--text-caption); color: var(--ink-200)" data-t="volCaption"></span>
+    </div>
+    <span style="flex-grow: 1"></span>
+    <div class="hud-r" style="display: flex; flex-direction: column; align-items: flex-end; gap: 6px">
+      <div style="display: flex; align-items: baseline; gap: 6px"><span style="font: var(--text-display-l); letter-spacing: -0.02em; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink-100)" data-t="pct">0,0</span><span style="font: var(--text-heading); color: var(--ink-300)">%</span></div>
+      <span style="font: var(--text-mono-s); color: var(--ink-200)" data-t="hudLine"></span>
+    </div>
   </div>
 
-  <div id="haskey" hidden>
-    <h2>Забрать</h2>
-    <pre id="cmd"></pre>
-    <button id="copy">Скопировать команду</button>
-    <p class="note" style="margin-top:14px">
-      Клиента ещё нет? Одна команда:
-      <span class="mono" id="install"></span>
-    </p>
+  <svg class="fx-shore" viewBox="0 0 300 120" aria-hidden="true" style="position: absolute; left: 0; bottom: 136px; width: 300px; height: 120px; z-index: 1">
+    <path d="M0 120 V92 H230 L250 100 V120 Z" fill="#0c1318"></path>
+    <g fill="#0c1318"><path d="M44 92 L50 30 H55 L50 92 Z"></path><path d="M74 92 L68 30 H73 L80 92 Z"></path><rect x="30" y="25" width="132" height="6"></rect><rect x="54" y="31" width="16" height="9"></rect></g>
+    <path d="M138 31 V58" stroke="#0c1318" stroke-width="1.4"></path>
+    <rect x="131" y="58" width="15" height="10" fill="#ff9a52" opacity=".55"></rect>
+    <g opacity=".55"><rect x="96" y="80" width="18" height="12" fill="#5a7382"></rect><rect x="115" y="80" width="18" height="12" fill="#2ba192"></rect><rect x="104" y="68" width="18" height="12" fill="#5a7382"></rect><rect x="180" y="80" width="18" height="12" fill="#ff9a52"></rect></g>
+    <circle class="fx-blink" cx="52" cy="22" r="2.2" fill="#ff6a1f"></circle>
+    <g fill="#f0b95a"><circle cx="16" cy="95" r="1.3"></circle><circle cx="90" cy="95" r="1.3"></circle><circle cx="170" cy="95" r="1.3"></circle></g>
+  </svg>
+  <span class="fx-shore" style="position: absolute; left: 24px; bottom: 262px; z-index: 2; font: var(--text-mono-s); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-300)">отправитель</span>
+
+  <div class="fx-shore" aria-hidden="true" style="position: absolute; right: 0; bottom: 120px; width: 220px; height: 190px; z-index: 1">
+    <svg viewBox="0 0 220 190" width="220" height="190" style="display: block; overflow: visible">
+      <defs>
+        <linearGradient id="fxBeamRx" x1="1" y1="0" x2="0" y2="0">
+          <stop offset="0" stop-color="#f0b95a" stop-opacity=".34"></stop>
+          <stop offset="1" stop-color="#f0b95a" stop-opacity="0"></stop>
+        </linearGradient>
+      </defs>
+      <g class="fx-beam" style="transform-origin: 155px 41px"><path d="M155 41 L-520 6 L-520 76 Z" fill="url(#fxBeamRx)"></path></g>
+      <circle cx="155" cy="41" r="18" fill="#f0b95a" opacity=".16"></circle>
+      <path d="M0 176 H120 V170 H0 Z" fill="#22303a"></path>
+      <path d="M8 176 V190 M40 176 V190 M72 176 V190 M104 176 V190" stroke="#22303a" stroke-width="3"></path>
+      <path d="M60 170 V140 H96 V170 Z" fill="#0c1318"></path><path d="M56 140 L78 126 L100 140 Z" fill="#0c1318"></path>
+      <rect x="70" y="148" width="8" height="8" fill="#f0b95a"></rect>
+      <path d="M28 170 V142" stroke="#5a7181" stroke-width="1.5"></path><circle cx="28" cy="140" r="3" fill="#f0b95a"></circle>
+      <path d="M110 190 Q118 166 136 160 Q154 152 172 160 Q192 168 200 190 Z" fill="#0c1318"></path>
+      <path d="M145 52 H165 L171 162 H139 Z" fill="#a8b7c2"></path>
+      <path d="M143.8 74 H166.2 L166.9 87 H143.1 Z" fill="#ff6a1f"></path>
+      <path d="M142.3 106 H167.7 L168.4 119 H141.6 Z" fill="#ff6a1f"></path>
+      <rect x="141" y="48" width="28" height="4" fill="#22303a"></rect>
+      <rect x="147" y="33" width="16" height="15" fill="#f0b95a"></rect>
+      <path d="M144 33 L155 21 L166 33 Z" fill="#22303a"></path>
+    </svg>
+  </div>
+  <span class="fx-shore" style="position: absolute; right: 96px; bottom: 318px; z-index: 2; font: var(--text-mono-s); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-300)">ваш причал</span>
+
+  <div aria-hidden="true" style="position: absolute; left: 0; right: 0; bottom: 0; height: 160px; z-index: 2; background: linear-gradient(180deg, #1b2934 0%, #131e27 35%, #0e161c 72%, #0b1015 100%)">
+    <div style="position: absolute; left: 0; right: 0; top: -4px; height: 40px; overflow: hidden">
+      <svg class="fx-wave" viewBox="0 0 2880 40" preserveAspectRatio="none" style="display: block; width: 200%; height: 40px; animation-duration: 60s"><path d="M0 10 Q30 6 60 10 T120 10 T180 10 T240 10 T300 10 T360 10 T420 10 T480 10 T540 10 T600 10 T660 10 T720 10 T780 10 T840 10 T900 10 T960 10 T1020 10 T1080 10 T1140 10 T1200 10 T1260 10 T1320 10 T1380 10 T1440 10 T1500 10 T1560 10 T1620 10 T1680 10 T1740 10 T1800 10 T1860 10 T1920 10 T1980 10 T2040 10 T2100 10 T2160 10 T2220 10 T2280 10 T2340 10 T2400 10 T2460 10 T2520 10 T2580 10 T2640 10 T2700 10 T2760 10 T2820 10 T2880 10 V40 H0 Z" fill="#22303a"></path></svg>
+    </div>
   </div>
 
-  <div id="nokey" hidden>
-    <h2 class="warn">В ссылке нет ключа</h2>
-    <p>Ключ — это часть ссылки после решётки. До сервера она не доходит
-    никогда, поэтому подставить её здесь невозможно: расшифровать том без
-    неё нельзя ни нам, ни серверу.</p>
-    <p>Попросите отправителя прислать ссылку целиком.</p>
+  <div class="fx-lane" style="position: absolute; left: 260px; right: 250px; bottom: 112px; height: 0; z-index: 3">
+    <div aria-hidden="true" style="position: absolute; left: 0; right: 0; top: -1px; border-top: 2px dotted rgba(126, 147, 162, 0.45)"></div>
+    <div class="fx-move" data-span="s2" aria-hidden="true" style="position: absolute; top: -5px; height: 11px; left: 0%; width: 0%; background: var(--seed); opacity: 0.18"></div>
+    <div class="fx-move" data-span="s2" aria-hidden="true" style="position: absolute; top: -1px; height: 3px; left: 0%; width: 0%; background: var(--seed)"></div>
+    <div class="fx-move" data-span="s1" aria-hidden="true" style="position: absolute; top: -5px; height: 11px; left: 0%; width: 0%; background: var(--signal); opacity: 0.18"></div>
+    <div class="fx-move" data-span="s1" aria-hidden="true" style="position: absolute; top: -1px; height: 3px; left: 0%; width: 0%; background: var(--signal)"></div>
+
+    <div data-if="two" hidden>
+      <div class="fx-move" data-left="tugX" style="position: absolute; bottom: -14px; left: 0%; width: 84px; height: 42px; transform: translateX(-88%)">
+        <div style="position: absolute; left: 4px; bottom: 54px; padding: 2px 8px; border: 1px solid var(--seed); background: rgba(11, 16, 21, 0.85); font: var(--text-mono-s); color: var(--seed-text); white-space: nowrap">волна 2 · <span data-t="w2">0</span> %</div>
+        <div class="fx-bob2" style="position: relative; width: 84px; height: 42px">
+          <div style="position: absolute; right: 74px; bottom: 9px; width: 120px; height: 5px; border-radius: 999px; background: linear-gradient(90deg, rgba(94, 205, 187, 0), rgba(94, 205, 187, 0.35))"></div>
+          <svg viewBox="0 0 56 28" width="84" height="42" aria-hidden="true" style="position: absolute; left: 0; top: 0">
+            <path d="M20 4 V11" stroke="#5a7181" stroke-width="1"></path>
+            <circle cx="20" cy="3" r="1.8" fill="#5ecdbb"></circle>
+            <rect x="10" y="10" width="22" height="7" fill="#a8b7c2"></rect>
+            <rect x="24" y="6" width="9" height="4" fill="#e8eef2"></rect>
+            <rect x="36" y="11" width="6" height="6" fill="#2ba192"></rect>
+            <rect x="43" y="11" width="6" height="6" fill="#2ba192"></rect>
+            <path d="M2 17 H54 L49 25 Q48 26 46 26 H8 Q6 26 5 24 Z" fill="#05080b" stroke="#5a7181" stroke-width=".8"></path>
+            <path d="M4 20 H52.6 L51.6 22 H4.8 Z" fill="#35b3a0"></path>
+          </svg>
+        </div>
+      </div>
+    </div>
+
+    <div class="fx-move fx-ship" data-left="shipX" style="position: absolute; bottom: -22px; left: 0%; width: 210px; height: 105px; transform: translateX(-92%)">
+      <div style="position: absolute; left: 62px; bottom: 116px; display: flex; align-items: center; gap: 6px; padding: 3px 9px; border: 1px solid var(--signal); background: rgba(11, 16, 21, 0.85); font: var(--text-mono-s); color: var(--signal-text); white-space: nowrap" data-t="shipTag">Ferry</div>
+      <div class="fx-bob" style="position: relative; width: 210px; height: 105px">
+        <div style="position: absolute; right: 190px; bottom: 16px; width: 240px; height: 6px; border-radius: 999px; background: linear-gradient(90deg, rgba(168, 183, 194, 0), rgba(168, 183, 194, 0.32))"></div>
+        <i class="fx-tw" style="position: absolute; right: 222px; bottom: 13px; width: 3px; height: 3px; border-radius: 50%; background: #5ecdbb"></i>
+        <i class="fx-tw" style="animation-delay: -1.2s; position: absolute; right: 268px; bottom: 19px; width: 2px; height: 2px; border-radius: 50%; background: #5ecdbb"></i>
+        <svg viewBox="0 0 240 120" width="210" height="105" aria-hidden="true" style="position: absolute; left: 0; top: 0; overflow: visible">
+          <g fill="#7e93a2"><circle class="fx-smoke" cx="83" cy="22" r="6"></circle><circle class="fx-smoke" style="animation-delay: -1.3s" cx="83" cy="22" r="6"></circle><circle class="fx-smoke" style="animation-delay: -2.6s" cx="83" cy="22" r="6"></circle></g>
+          <path d="M140 38 V12 M133 19 H147" stroke="#5a7181" stroke-width="1.5" fill="none"></path>
+          <path d="M140 14 L196 64 M140 14 L12 50" stroke="#5a7181" stroke-width=".7" fill="none"></path>
+          <rect x="150" y="22" width="7" height="5" fill="#e8eef2"></rect><path d="M150 22 L157 27 M157 22 L150 27" stroke="#ff6a1f" stroke-width="1.2"></path>
+          <rect x="163" y="27" width="7" height="5" fill="#5a7181"></rect><rect x="163" y="29.5" width="7" height="2.5" fill="#ff6a1f"></rect>
+          <rect x="176" y="34" width="7" height="5" fill="#ff6a1f"></rect><path d="M179.5 34 V39 M176 36.5 H183" stroke="#e5a32a" stroke-width="1.2"></path>
+          <rect x="115" y="22" width="7" height="5" fill="#e5a32a"></rect>
+          <circle cx="140" cy="10" r="10" fill="#ff6a1f" opacity=".2"></circle><circle cx="140" cy="10" r="2.6" fill="#ff8c47"></circle>
+          <path d="M70 54 L74 26 H93 L95 54 Z" fill="#22303a"></path><path d="M73.2 32 H93.8 L94.6 39 H72.2 Z" fill="#ff6a1f"></path>
+          <rect x="38" y="54" width="128" height="22" fill="#a8b7c2"></rect><rect x="44" y="60" width="116" height="6" fill="#121a21"></rect>
+          <g fill="#f0b95a"><rect x="46" y="60" width="7" height="6"></rect><rect x="56" y="60" width="7" height="6"></rect><rect x="76" y="60" width="7" height="6"></rect><rect x="86" y="60" width="7" height="6"></rect><rect x="96" y="60" width="7" height="6"></rect><rect x="116" y="60" width="7" height="6"></rect><rect x="136" y="60" width="7" height="6"></rect><rect x="146" y="60" width="7" height="6"></rect></g>
+          <rect x="116" y="38" width="50" height="16" fill="#e8eef2"></rect><rect x="122" y="42" width="40" height="5" fill="#121a21"></rect><rect x="150" y="42" width="9" height="5" fill="#f0b95a"></rect>
+          <rect x="170" y="64" width="13" height="12" fill="#5a7382"></rect><rect x="184" y="64" width="13" height="12" fill="#2ba192"></rect><rect x="198" y="64" width="13" height="12" fill="#ff9a52"></rect>
+          <rect x="177" y="53" width="13" height="11" fill="#ff9a52"></rect><rect x="191" y="53" width="13" height="11" fill="#5a7382"></rect>
+          <rect x="14" y="64" width="20" height="12" fill="#2ba192"></rect>
+          <path d="M10 76 V46" stroke="#5a7181" stroke-width="1.2"></path><path class="fx-flag" d="M10 46 L27 50.5 L10 55 Z" fill="#ff6a1f"></path>
+          <path d="M6 76 H230 L213 108 Q210 112 203 112 H32 Q24 112 20 106 Z" fill="#05080b"></path>
+          <path d="M6 76 H230" stroke="#5a7181" stroke-width="1.5"></path>
+          <path d="M12.5 90 H222.6 L219.4 96 H15 Z" fill="#ff6a1f"></path>
+          <g fill="#f0b95a"><circle cx="40" cy="83" r="2"></circle><circle cx="58" cy="83" r="2"></circle><circle cx="76" cy="83" r="2"></circle><circle cx="112" cy="83" r="2"></circle><circle cx="130" cy="83" r="2"></circle><circle cx="166" cy="83" r="2"></circle><circle cx="184" cy="83" r="2"></circle></g>
+        </svg>
+      </div>
+    </div>
   </div>
 
-  <h2>Что это</h2>
-  <p>Имя файла и его содержимое зашифрованы на устройстве отправителя.
-  Сервер видит только шифротекст, размер и количество чанков — что именно
-  здесь лежит, знает лишь тот, у кого есть ключ.</p>
-  <p class="note">Приём прямо в браузере появится следующим шагом. Пока том
-  забирается клиентом из командной строки.</p>
-</main>
-<script>
-(function () {
-  var id = location.pathname.replace(/^\/t\//, '').replace(/\/$/, '');
-  // Фрагмент читаем здесь и только здесь: он не уходит ни в запрос, ни в
-  // логи, ни в Referer. Сервер эту страницу отдаёт одну и ту же для всех
-  // раздач — подставить ключ он физически не может.
-  var key = location.hash.slice(1);
-  var link = location.origin + '/t/' + id + (key ? '#' + key : '');
+  <div aria-hidden="true" style="position: absolute; left: 0; right: 0; bottom: 36px; height: 80px; overflow: hidden; z-index: 4">
+    <svg class="fx-wave" viewBox="0 0 2880 80" preserveAspectRatio="none" style="display: block; width: 200%; height: 80px; animation-duration: 28s"><path d="M0 22 Q60 13 120 22 T240 22 T360 22 T480 22 T600 22 T720 22 T840 22 T960 22 T1080 22 T1200 22 T1320 22 T1440 22 T1560 22 T1680 22 T1800 22 T1920 22 T2040 22 T2160 22 T2280 22 T2400 22 T2520 22 T2640 22 T2760 22 T2880 22 V80 H0 Z" fill="#121a21" stroke="rgba(126,147,162,.26)" stroke-width="1.5" vector-effect="non-scaling-stroke"></path></svg>
+  </div>
 
-  document.getElementById('install').textContent =
-    'curl -fsSL ' + location.origin + '/install.sh | sh';
+  <div class="fx-lane fx-buoys" data-list="buoys" aria-hidden="true" style="position: absolute; left: 260px; right: 250px; bottom: 74px; height: 40px; z-index: 5">
+    <template data-tpl="buoy">
+      <div data-left="x" style="position: absolute; top: 0; left: 0%; display: flex; flex-direction: column; align-items: center; gap: 4px; transform: translateX(-50%)">
+        <svg viewBox="0 0 16 20" width="14" height="18" class="fx-buoy" style="display: block"><circle cx="8" cy="2" r="1.6" fill="#f0b95a"></circle><path d="M4 16 L6 5 H10 L12 16 Z" fill="#5a7181" data-fill="color"></path><rect x="5.5" y="9" width="5" height="2" fill="#e8eef2"></rect></svg>
+        <span style="font: var(--text-mono-s); color: var(--ink-300); white-space: nowrap" data-t="label"></span>
+      </div>
+    </template>
+  </div>
 
-  if (key) {
-    document.getElementById('haskey').hidden = false;
-    document.getElementById('cmd').textContent = 'ferry get "' + link + '"';
-    document.getElementById('copy').onclick = function () {
-      var b = this;
-      navigator.clipboard.writeText('ferry get "' + link + '"').then(function () {
-        b.textContent = 'Скопировано';
-        setTimeout(function () { b.textContent = 'Скопировать команду'; }, 1500);
-      });
-    };
-  } else {
-    document.getElementById('nokey').hidden = false;
-  }
+  <div aria-hidden="true" style="position: absolute; left: 0; right: 0; bottom: 0; height: 44px; overflow: hidden; z-index: 5">
+    <svg class="fx-wave" viewBox="0 0 2880 40" preserveAspectRatio="none" style="display: block; width: 200%; height: 44px; animation-duration: 18s"><path d="M0 10 Q30 6 60 10 T120 10 T180 10 T240 10 T300 10 T360 10 T420 10 T480 10 T540 10 T600 10 T660 10 T720 10 T780 10 T840 10 T900 10 T960 10 T1020 10 T1080 10 T1140 10 T1200 10 T1260 10 T1320 10 T1380 10 T1440 10 T1500 10 T1560 10 T1620 10 T1680 10 T1740 10 T1800 10 T1860 10 T1920 10 T1980 10 T2040 10 T2100 10 T2160 10 T2220 10 T2280 10 T2340 10 T2400 10 T2460 10 T2520 10 T2580 10 T2640 10 T2700 10 T2760 10 T2820 10 T2880 10 V40 H0 Z" fill="#0b1015"></path></svg>
+  </div>
+  <div role="progressbar" aria-label="Принято от тома" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="rx-bar" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%)"><span data-t="pct">0,0</span> %</div>
+</section>
 
-  function human(n) {
-    var u = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'], i = 0;
-    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-    return (i === 0 ? n : n.toFixed(1)).toString().replace('.', ',') + ' ' + u[i];
-  }
+<section class="fx-scene done-scene" id="done-scene" hidden aria-label="Паром у вашего причала" style="position: relative; height: 420px; overflow: hidden; isolation: isolate; background: linear-gradient(180deg, #0b1015 0%, #111b23 36%, #1d2932 62%, #2f2a27 82%, #3d2b1f 100%)">
+  <div aria-hidden="true" style="position: absolute; left: 22%; bottom: 150px; width: 140px; height: 140px; border-radius: 50%; background: radial-gradient(circle, rgba(255, 140, 71, 0.9) 0%, rgba(255, 140, 71, 0.55) 34%, rgba(255, 106, 31, 0.12) 56%, rgba(255, 106, 31, 0) 72%); transform: translateY(70px)"></div>
+  <div aria-hidden="true" style="position: absolute; left: 0; right: 0; bottom: 150px; height: 200px; background: radial-gradient(50% 100% at 25% 100%, rgba(255, 106, 31, 0.16), rgba(255, 106, 31, 0) 70%)"></div>
 
-  // Эта ручка ничего не сжигает: ни использования, ни challenge. По ней
-  // ходят превью-боты мессенджеров, и это в порядке вещей.
-  fetch('/api/transfers/' + encodeURIComponent(id))
-    .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
-    .then(function (m) {
-      document.getElementById('state').textContent =
-        m.state === 'active' ? 'отправитель на связи' : 'отправителя нет';
-      document.getElementById('m-id').textContent = id;
-      document.getElementById('m-size').textContent = human(m.total);
-      document.getElementById('m-chunks').textContent =
-        m.chunks + ' по ' + human(m.chunk_size);
-      document.getElementById('m-state').textContent =
-        (m.state === 'active' ? 'активна' : 'закрыта')
-        + (m.uses_left >= 0 ? ' · осталось использований: ' + m.uses_left : '')
-        + ' · получателей: ' + m.receivers;
-      document.getElementById('meta').hidden = false;
-    })
-    .catch(function () {
-      document.getElementById('state').textContent =
-        'такой раздачи на сервере нет — её закрыли или сервер перезапускали';
-    });
-})();
-</script>
+  <div class="fx-gull" aria-hidden="true" style="position: absolute; top: 90px; left: 0">
+    <svg viewBox="0 0 80 30" width="80" height="30"><path class="fx-flap" d="M0 8 Q6 2 12 8 Q18 2 24 8" fill="none" stroke="#a8b7c2" stroke-width="1.6" stroke-linecap="round"></path><path class="fx-flap" style="animation-delay:-.3s" d="M36 20 Q41 15 46 20 Q51 15 56 20" fill="none" stroke="#a8b7c2" stroke-width="1.4" stroke-linecap="round"></path><path class="fx-flap" style="animation-delay:-.6s" d="M58 4 Q62 0 66 4 Q70 0 74 4" fill="none" stroke="#7e93a2" stroke-width="1.2" stroke-linecap="round"></path></svg>
+  </div>
+
+  <div class="fx-stampbox" style="position: absolute; right: 12%; top: 54px; z-index: 6">
+    <div class="fx-stamp" style="display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 26px; border: 4px double var(--ok); color: var(--ok-text); background: rgba(11, 16, 21, 0.55)">
+      <span style="font: 600 34px/38px var(--font-mono); letter-spacing: 0.16em; text-transform: uppercase">доставлено</span>
+      <span style="font: var(--text-mono-s); letter-spacing: 0.12em; color: var(--ink-200)" data-t="doneStampSub"></span>
+    </div>
+  </div>
+
+  <div aria-hidden="true" style="position: absolute; left: 0; right: 0; bottom: 0; height: 160px; z-index: 1; background: linear-gradient(180deg, #2a2b2b 0%, #1a2229 30%, #10181e 70%, #0b1015 100%)">
+    <div style="position: absolute; top: 6px; left: calc(22% + 30px); width: 90px; height: 120px">
+      <i class="fx-shim" style="position: absolute; top: 0; left: 6px; width: 74px; height: 3px; background: rgba(255, 140, 71, 0.6)"></i>
+      <i class="fx-shim" style="animation-delay: -0.7s; position: absolute; top: 14px; left: 18px; width: 52px; height: 2px; background: rgba(255, 140, 71, 0.5)"></i>
+      <i class="fx-shim" style="animation-delay: -1.4s; position: absolute; top: 30px; left: 2px; width: 84px; height: 2px; background: rgba(255, 140, 71, 0.4)"></i>
+      <i class="fx-shim" style="animation-delay: -2.1s; position: absolute; top: 52px; left: 26px; width: 36px; height: 2px; background: rgba(255, 140, 71, 0.3)"></i>
+      <i class="fx-shim" style="animation-delay: -1s; position: absolute; top: 80px; left: 14px; width: 60px; height: 2px; background: rgba(255, 140, 71, 0.2)"></i>
+    </div>
+    <div style="position: absolute; left: 0; right: 0; top: -6px; height: 40px; overflow: hidden">
+      <svg class="fx-wave" viewBox="0 0 2880 40" preserveAspectRatio="none" style="display: block; width: 200%; height: 40px; animation-duration: 80s"><path d="M0 10 Q30 6 60 10 T120 10 T180 10 T240 10 T300 10 T360 10 T420 10 T480 10 T540 10 T600 10 T660 10 T720 10 T780 10 T840 10 T900 10 T960 10 T1020 10 T1080 10 T1140 10 T1200 10 T1260 10 T1320 10 T1380 10 T1440 10 T1500 10 T1560 10 T1620 10 T1680 10 T1740 10 T1800 10 T1860 10 T1920 10 T1980 10 T2040 10 T2100 10 T2160 10 T2220 10 T2280 10 T2340 10 T2400 10 T2460 10 T2520 10 T2580 10 T2640 10 T2700 10 T2760 10 T2820 10 T2880 10 V40 H0 Z" fill="#2c3237" opacity=".8"></path></svg>
+    </div>
+  </div>
+
+  <div class="fx-pier" aria-hidden="true" style="position: absolute; right: 0; bottom: 100px; width: 640px; height: 220px; z-index: 2">
+    <svg viewBox="0 0 640 220" width="640" height="220" style="display: block; overflow: visible">
+      <rect x="250" y="150" width="390" height="10" fill="#22303a"></rect>
+      <rect x="250" y="160" width="390" height="4" fill="#121a21"></rect>
+      <path d="M270 164 V220 M330 164 V220 M390 164 V220 M450 164 V220 M510 164 V220 M570 164 V220 M630 164 V220" stroke="#121a21" stroke-width="6"></path>
+      <rect x="262" y="140" width="8" height="10" fill="#5a7181"></rect>
+      <rect x="420" y="140" width="8" height="10" fill="#5a7181"></rect>
+      <g>
+        <rect x="470" y="122" width="34" height="28" fill="#5a7382"></rect><rect x="505" y="122" width="34" height="28" fill="#2ba192"></rect><rect x="540" y="122" width="34" height="28" fill="#5a7382"></rect>
+        <rect x="487" y="94" width="34" height="28" fill="#ff9a52"></rect><rect x="522" y="94" width="34" height="28" fill="#5a7382"></rect>
+        <rect x="575" y="122" width="34" height="28" fill="#2ba192"></rect><rect x="557" y="94" width="34" height="28" fill="#2ba192"></rect>
+        <path d="M474 126 V146 M480 126 V146 M486 126 V146 M492 126 V146 M498 126 V146 M509 126 V146 M515 126 V146 M521 126 V146 M527 126 V146 M533 126 V146 M544 126 V146 M550 126 V146 M556 126 V146 M562 126 V146 M568 126 V146 M579 126 V146 M585 126 V146 M591 126 V146 M597 126 V146 M603 126 V146 M491 98 V118 M497 98 V118 M503 98 V118 M509 98 V118 M515 98 V118 M526 98 V118 M532 98 V118 M538 98 V118 M544 98 V118 M550 98 V118 M561 98 V118 M567 98 V118 M573 98 V118 M579 98 V118 M585 98 V118" stroke="rgba(0,0,0,.22)" stroke-width="1"></path>
+      </g>
+      <path d="M612 150 V60 M590 60 H636 M600 60 V84" stroke="#3d505c" stroke-width="4" fill="none"></path>
+      <path d="M612 150 V66" stroke="#22303a" stroke-width="2"></path>
+      <path d="M640 150 V40" stroke="#5a7181" stroke-width="1.5"></path>
+      <circle cx="640" cy="38" r="3" fill="#f0b95a"></circle>
+      <path d="M20 132 L262 144" stroke="#7e93a2" stroke-width="1"></path>
+      <path d="M232 128 L424 144" stroke="#7e93a2" stroke-width="1"></path>
+    </svg>
+  </div>
+
+  <div class="fx-bob-soft" aria-hidden="true" style="position: absolute; right: 400px; bottom: 74px; width: 260px; height: 130px; z-index: 3">
+    <svg viewBox="0 0 240 120" width="260" height="130" style="display: block; overflow: visible">
+      <path d="M140 38 V12 M133 19 H147" stroke="#5a7181" stroke-width="1.5" fill="none"></path>
+      <path d="M140 14 L196 64 M140 14 L12 50" stroke="#5a7181" stroke-width=".7" fill="none"></path>
+      <rect x="150" y="22" width="7" height="5" fill="#e8eef2"></rect><path d="M150 22 L157 27 M157 22 L150 27" stroke="#ff6a1f" stroke-width="1.2"></path>
+      <rect x="163" y="27" width="7" height="5" fill="#5a7181"></rect><rect x="163" y="29.5" width="7" height="2.5" fill="#ff6a1f"></rect>
+      <rect x="176" y="34" width="7" height="5" fill="#ff6a1f"></rect><path d="M179.5 34 V39 M176 36.5 H183" stroke="#e5a32a" stroke-width="1.2"></path>
+      <rect x="115" y="22" width="7" height="5" fill="#e5a32a"></rect>
+      <circle cx="140" cy="10" r="2.6" fill="#ff8c47"></circle>
+      <path d="M70 54 L74 26 H93 L95 54 Z" fill="#22303a"></path><path d="M73.2 32 H93.8 L94.6 39 H72.2 Z" fill="#ff6a1f"></path>
+      <rect x="38" y="54" width="128" height="22" fill="#c3ced6"></rect><rect x="44" y="60" width="116" height="6" fill="#121a21"></rect>
+      <g fill="#f0b95a" opacity=".7"><rect x="56" y="60" width="7" height="6"></rect><rect x="96" y="60" width="7" height="6"></rect><rect x="136" y="60" width="7" height="6"></rect></g>
+      <rect x="116" y="38" width="50" height="16" fill="#e8eef2"></rect><rect x="122" y="42" width="40" height="5" fill="#121a21"></rect>
+      <path d="M10 76 V46" stroke="#5a7181" stroke-width="1.2"></path><path class="fx-flag" d="M10 46 L27 50.5 L10 55 Z" fill="#3fae6a"></path>
+      <path d="M6 76 H230 L213 108 Q210 112 203 112 H32 Q24 112 20 106 Z" fill="#070b0e"></path>
+      <path d="M6 76 H230" stroke="#7e93a2" stroke-width="1.5"></path>
+      <path d="M12.5 90 H222.6 L219.4 96 H15 Z" fill="#ff6a1f"></path>
+      <g fill="#263440"><circle cx="40" cy="83" r="2"></circle><circle cx="58" cy="83" r="2"></circle><circle cx="76" cy="83" r="2"></circle><circle cx="94" cy="83" r="2"></circle><circle cx="112" cy="83" r="2"></circle><circle cx="130" cy="83" r="2"></circle><circle cx="148" cy="83" r="2"></circle><circle cx="166" cy="83" r="2"></circle><circle cx="184" cy="83" r="2"></circle><circle cx="202" cy="83" r="2"></circle></g>
+    </svg>
+  </div>
+
+  <div aria-hidden="true" style="position: absolute; left: 0; right: 0; bottom: 0; height: 90px; overflow: hidden; z-index: 4">
+    <svg class="fx-wave" viewBox="0 0 2880 80" preserveAspectRatio="none" style="display: block; width: 200%; height: 90px; animation-duration: 36s"><path d="M0 22 Q60 13 120 22 T240 22 T360 22 T480 22 T600 22 T720 22 T840 22 T960 22 T1080 22 T1200 22 T1320 22 T1440 22 T1560 22 T1680 22 T1800 22 T1920 22 T2040 22 T2160 22 T2280 22 T2400 22 T2520 22 T2640 22 T2760 22 T2880 22 V80 H0 Z" fill="#10181e" stroke="rgba(255,140,71,.18)" stroke-width="1.5" vector-effect="non-scaling-stroke"></path></svg>
+  </div>
+</section>
+
+<!-- ============ ожидание ============ -->
+<article class="sheet" id="v-boot">
+  <header class="sheet-head">
+    <div class="brand">
+      <div class="brand-row"><a class="brand-name" href="/">Ferry</a><svg viewBox="0 0 104 20" width="83" height="16" aria-hidden="true">
+          <path d="M0 3 Q52 12 104 3" stroke="#5a7181" stroke-width="1" fill="none"></path>
+          <g transform="translate(2 4.5)"><rect width="16" height="12" fill="#e8eef2"></rect><path d="M8 0 L16 6 L8 12 L0 6 Z" fill="#ff6a1f"></path></g>
+          <g transform="translate(22 6.5)"><rect width="16" height="6" fill="#5a7181"></rect><rect y="6" width="16" height="6" fill="#ff6a1f"></rect></g>
+          <g transform="translate(42 7.5)"><rect width="16" height="12" fill="#ff6a1f"></rect><rect x="6.5" width="3" height="12" fill="#e5a32a"></rect><rect y="4.5" width="16" height="3" fill="#e5a32a"></rect></g>
+          <g transform="translate(62 7)"><rect width="16" height="12" fill="#ff6a1f"></rect><rect x="6.5" width="3" height="12" fill="#e5a32a"></rect><rect y="4.5" width="16" height="3" fill="#e5a32a"></rect></g>
+          <g transform="translate(82 5)"><rect width="16" height="12" fill="#e5a32a"></rect><path d="M3 0H6L0 6V3Z M9 0H12L0 12V9Z M15 0H16V2L6 12H3Z M16 5V8L12 12H9Z" fill="#ff6a1f"></path></g>
+        </svg></div>
+      <span class="eyebrow">квитанция приёма</span>
+    </div>
+  </header>
+  <p class="lead-sub" data-t="bootText">Читаю ссылку…</p>
+  <noscript><p class="lead-sub">Для приёма в браузере нужен JavaScript. Без него том можно забрать клиентом Ferry из терминала: <span class="mono">ferry get "ссылка"</span>.</p></noscript>
+</article>
+
+<!-- ============ R1–R2: превью и место выгрузки ============ -->
+<article class="sheet" id="v-preview" hidden>
+  <header class="sheet-head">
+    <div class="brand">
+      <div class="brand-row"><a class="brand-name" href="/">Ferry</a><svg viewBox="0 0 104 20" width="83" height="16" aria-hidden="true">
+          <path d="M0 3 Q52 12 104 3" stroke="#5a7181" stroke-width="1" fill="none"></path>
+          <g transform="translate(2 4.5)"><rect width="16" height="12" fill="#e8eef2"></rect><path d="M8 0 L16 6 L8 12 L0 6 Z" fill="#ff6a1f"></path></g>
+          <g transform="translate(22 6.5)"><rect width="16" height="6" fill="#5a7181"></rect><rect y="6" width="16" height="6" fill="#ff6a1f"></rect></g>
+          <g transform="translate(42 7.5)"><rect width="16" height="12" fill="#ff6a1f"></rect><rect x="6.5" width="3" height="12" fill="#e5a32a"></rect><rect y="4.5" width="16" height="3" fill="#e5a32a"></rect></g>
+          <g transform="translate(62 7)"><rect width="16" height="12" fill="#ff6a1f"></rect><rect x="6.5" width="3" height="12" fill="#e5a32a"></rect><rect y="4.5" width="16" height="3" fill="#e5a32a"></rect></g>
+          <g transform="translate(82 5)"><rect width="16" height="12" fill="#e5a32a"></rect><path d="M3 0H6L0 6V3Z M9 0H12L0 12V9Z M15 0H16V2L6 12H3Z M16 5V8L12 12H9Z" fill="#ff6a1f"></path></g>
+        </svg></div>
+      <span class="eyebrow">груз к выдаче</span>
+    </div>
+    <span class="grow"></span>
+    <div class="head-id"><span class="eyebrow">раздача</span><span class="v" data-t="id"></span></div>
+    <div class="stamp" id="pv-stamp"><b data-t="pvStamp">к выдаче</b><small data-t="pvStampSub">раздача активна</small></div>
+  </header>
+
+  <div class="banner banner--seed" id="pv-resume" hidden>
+    <span class="dot" style="background: var(--seed)"></span>
+    <p><span data-t="resumeText"></span><small data-t="resumeSub"></small></p>
+  </div>
+
+  <div class="two">
+    <section class="sec sec--tight">
+      <div class="sec-h"><span class="n">01</span><h2>том</h2><span class="rule"></span></div>
+      <p class="vol-name" data-t="volName"></p>
+      <div class="kvs" id="pv-vol"></div>
+      <p class="caption">Имя и состав пришли в зашифрованной описи: сервер их не видел и увидеть не может. Расшифровал их ваш браузер ключом из ссылки.</p>
+    </section>
+    <section class="sec sec--tight">
+      <div class="sec-h"><span class="n">02</span><h2>условия выдачи</h2><span class="rule"></span></div>
+      <div class="kvs" id="pv-terms"></div>
+      <p class="caption" data-t="termsNote"></p>
+    </section>
+  </div>
+
+  <section class="sec sec--tight">
+    <div class="sec-h"><span class="n">03</span><h2>опись вложения</h2><span class="rule"></span><span class="aside" data-t="listNote"></span></div>
+    <div class="files" id="pv-files"></div>
+    <div class="btns"><button type="button" class="btn btn-g" id="pv-more" hidden></button></div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-h"><span class="n">04</span><h2>куда выгрузить</h2><span class="rule"></span></div>
+    <div class="opts" role="radiogroup" aria-label="Куда выгрузить том">
+      <label class="opt"><input type="radio" name="dest" value="dir" id="dest-dir"><span class="t"><b>В папку на этом компьютере</b><span data-t="optDirText"></span></span></label>
+      <label class="opt"><input type="radio" name="dest" value="download" id="dest-dl"><span class="t"><b>Через «Загрузки» браузера</b><span data-t="optDlText"></span></span></label>
+    </div>
+    <div class="kvs" id="pv-space"></div>
+    <p class="caption caption--2" id="pv-space-note"></p>
+  </section>
+
+  <details class="more" data-cli>
+    <summary>Забрать из терминала</summary>
+    <div>
+      <p class="caption caption--2">Тот же том тем же ключом — клиентом Ferry. Удобно для больших томов и для машин без браузера.</p>
+      <pre class="term"><span class="pr">$ </span><span data-t="cliCmd"></span></pre>
+      <div class="btns"><button type="button" class="btn" data-copy="cliCmd">Скопировать команду</button></div>
+      <p class="caption">Клиента ещё нет? Одна команда: <span class="mono" data-t="installCmd"></span></p>
+    </div>
+  </details>
+
+  <footer class="sheet-foot">
+    <button type="button" class="btn btn-p" id="pv-go">Принять том</button>
+    <span class="caption caption--2" data-t="goNote">Приём идёт в этой вкладке. Её можно свернуть, но не закрывать.</span>
+  </footer>
+</article>
+
+<!-- ============ R3–R4: приём и обрыв ============ -->
+<article class="sheet" id="v-rx" hidden>
+  <header class="sheet-head">
+    <div class="brand">
+      <div class="brand-row"><a class="brand-name" href="/">Ferry</a><svg viewBox="0 0 104 20" width="83" height="16" aria-hidden="true">
+          <path d="M0 3 Q52 12 104 3" stroke="#5a7181" stroke-width="1" fill="none"></path>
+          <g transform="translate(2 4.5)"><rect width="16" height="12" fill="#e8eef2"></rect><path d="M8 0 L16 6 L8 12 L0 6 Z" fill="#ff6a1f"></path></g>
+          <g transform="translate(22 6.5)"><rect width="16" height="6" fill="#5a7181"></rect><rect y="6" width="16" height="6" fill="#ff6a1f"></rect></g>
+          <g transform="translate(42 7.5)"><rect width="16" height="12" fill="#ff6a1f"></rect><rect x="6.5" width="3" height="12" fill="#e5a32a"></rect><rect y="4.5" width="16" height="3" fill="#e5a32a"></rect></g>
+          <g transform="translate(62 7)"><rect width="16" height="12" fill="#ff6a1f"></rect><rect x="6.5" width="3" height="12" fill="#e5a32a"></rect><rect y="4.5" width="16" height="3" fill="#e5a32a"></rect></g>
+          <g transform="translate(82 5)"><rect width="16" height="12" fill="#e5a32a"></rect><path d="M3 0H6L0 6V3Z M9 0H12L0 12V9Z M15 0H16V2L6 12H3Z M16 5V8L12 12H9Z" fill="#ff6a1f"></path></g>
+        </svg></div>
+      <span class="eyebrow">квитанция приёма</span>
+    </div>
+    <span class="grow"></span>
+    <div class="head-id"><span class="eyebrow">раздача</span><span class="v" data-t="id"></span></div>
+    <div class="stamp" id="rx-stamp"><b data-t="rxStamp">на подходе</b><small data-t="rxStampSub">подключаюсь</small></div>
+  </header>
+
+  <div class="banner" id="rx-banner" hidden role="status">
+    <span class="dot" id="rx-banner-dot"></span>
+    <p><span data-t="bannerText"></span><small data-t="bannerSub"></small></p>
+    <button type="button" class="btn btn-p" id="rx-banner-btn"></button>
+  </div>
+
+  <section class="sec">
+    <div class="sec-h"><span class="n">01</span><h2>ход приёма</h2><span class="rule"></span><span class="aside">обновляется раз в секунду</span></div>
+    <div class="g4">
+      <div class="stat"><span class="k">скорость</span><span class="v"><span data-t="rate">0,0</span> <span class="u">МБ/с</span></span></div>
+      <div class="stat"><span class="k">принято</span><span class="v"><span data-t="got">0</span> <span class="u">из <span data-t="totalH"></span></span></span></div>
+      <div class="stat"><span class="k">осталось</span><span class="v" data-t="eta">—</span></div>
+      <div class="stat"><span class="k">проверено BLAKE3</span><span class="v v--ok"><span data-t="ver">0</span> <span class="u">из <span data-t="countH"></span></span></span></div>
+    </div>
+    <p class="caption" id="rx-hashnote" hidden></p>
+    <div class="sec sec--tight" id="rx-src" hidden>
+      <div class="srcbar" aria-hidden="true"><i class="sw-have" data-src="window"></i><i class="sw-peer" data-src="peers"></i><i class="sw-sender" data-src="sender"></i></div>
+      <div class="legend">
+        <span><i class="sw-have"></i>из окна сервера <b data-t="srcWindow">0 %</b></span>
+        <span><i class="sw-peer"></i>от других получателей <b class="v--seed" data-t="srcPeers">0 %</b></span>
+        <span><i class="sw-sender"></i>от отправителя <b data-t="srcSender">0 %</b></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-h"><span class="n">02</span><h2>волны</h2><span class="rule"></span><span class="aside" data-t="waveNote"></span></div>
+    <div class="wave-row">
+      <span class="lab" style="color: var(--signal-text)" data-t="w1label"></span>
+      <div class="wave-track">
+        <svg viewBox="0 0 1000 28" preserveAspectRatio="none" width="100%" height="28" aria-hidden="true">
+          <defs><clipPath id="fxClipW1"><rect id="w1-clip" x="0" y="0" width="0" height="28"></rect></clipPath></defs>
+          <path d="M0 14 Q25 8 50 14 T100 14 T150 14 T200 14 T250 14 T300 14 T350 14 T400 14 T450 14 T500 14 T550 14 T600 14 T650 14 T700 14 T750 14 T800 14 T850 14 T900 14 T950 14 T1000 14" fill="none" stroke="#22303a" stroke-width="6" vector-effect="non-scaling-stroke"></path>
+          <path clip-path="url(#fxClipW1)" d="M0 14 Q25 8 50 14 T100 14 T150 14 T200 14 T250 14 T300 14 T350 14 T400 14 T450 14 T500 14 T550 14 T600 14 T650 14 T700 14 T750 14 T800 14 T850 14 T900 14 T950 14 T1000 14" fill="none" stroke="#ff6a1f" stroke-width="6" vector-effect="non-scaling-stroke"></path>
+        </svg>
+        <svg class="wave-boat" id="w1-boat" viewBox="0 0 56 28" width="34" height="17" aria-hidden="true"><path d="M2 17 H54 L49 25 Q48 26 46 26 H8 Q6 26 5 24 Z" fill="#05080b" stroke="#a8b7c2" stroke-width="1.5"></path><rect x="10" y="9" width="22" height="8" fill="#a8b7c2"></rect><path d="M4 20 H52.6 L51.6 22 H4.8 Z" fill="#ff6a1f"></path></svg>
+      </div>
+      <span class="pc"><span data-t="w1">0</span> %</span>
+    </div>
+    <div class="wave-row" data-if="two" hidden>
+      <span class="lab" style="color: var(--seed-text)">волна 2 · начало, от других</span>
+      <div class="wave-track">
+        <svg viewBox="0 0 1000 28" preserveAspectRatio="none" width="100%" height="28" aria-hidden="true">
+          <defs><clipPath id="fxClipW2"><rect id="w2-clip" x="0" y="0" width="0" height="28"></rect></clipPath></defs>
+          <path d="M0 14 Q25 8 50 14 T100 14 T150 14 T200 14 T250 14 T300 14 T350 14 T400 14 T450 14 T500 14 T550 14 T600 14 T650 14 T700 14 T750 14 T800 14 T850 14 T900 14 T950 14 T1000 14" fill="none" stroke="#22303a" stroke-width="6" vector-effect="non-scaling-stroke"></path>
+          <path clip-path="url(#fxClipW2)" d="M0 14 Q25 8 50 14 T100 14 T150 14 T200 14 T250 14 T300 14 T350 14 T400 14 T450 14 T500 14 T550 14 T600 14 T650 14 T700 14 T750 14 T800 14 T850 14 T900 14 T950 14 T1000 14" fill="none" stroke="#35b3a0" stroke-width="6" vector-effect="non-scaling-stroke"></path>
+        </svg>
+        <svg class="wave-boat" id="w2-boat" viewBox="0 0 56 28" width="30" height="15" aria-hidden="true"><path d="M2 17 H54 L49 25 Q48 26 46 26 H8 Q6 26 5 24 Z" fill="#05080b" stroke="#5ecdbb" stroke-width="1.5"></path><rect x="10" y="9" width="22" height="8" fill="#a8b7c2"></rect><path d="M4 20 H52.6 L51.6 22 H4.8 Z" fill="#35b3a0"></path></svg>
+      </div>
+      <span class="pc"><span data-t="w2">0</span> %</span>
+    </div>
+    <p class="caption" data-t="waveText"></p>
+  </section>
+
+  <section class="sec sec--tight">
+    <div class="sec-h"><span class="n">03</span><h2>трюм · карта тома</h2><span class="rule"></span><span class="aside" data-t="mapNote"></span></div>
+    <div class="vmap-wrap">
+      <div class="vmap-mark" data-left="shipX" aria-hidden="true">
+        <svg viewBox="0 0 56 28" width="30" height="15"><path d="M2 17 H54 L49 25 Q48 26 46 26 H8 Q6 26 5 24 Z" fill="#05080b" stroke="#a8b7c2" stroke-width="1.5"></path><rect x="10" y="9" width="22" height="8" fill="#a8b7c2"></rect><path d="M4 20 H52.6 L51.6 22 H4.8 Z" fill="#ff6a1f"></path></svg>
+        <i></i>
+      </div>
+      <div data-if="two" hidden>
+        <div class="vmap-mark vmap-mark--2" data-left="tugX" aria-hidden="true">
+          <svg viewBox="0 0 56 28" width="26" height="13"><path d="M2 17 H54 L49 25 Q48 26 46 26 H8 Q6 26 5 24 Z" fill="#05080b" stroke="#5ecdbb" stroke-width="1.5"></path><rect x="10" y="9" width="22" height="8" fill="#a8b7c2"></rect><path d="M4 20 H52.6 L51.6 22 H4.8 Z" fill="#35b3a0"></path></svg>
+          <i></i>
+        </div>
+      </div>
+      <div class="vmap" id="rx-map" role="img" aria-label="Карта тома: какие участки уже приняты"></div>
+      <div class="vmap-ticks" id="rx-ticks"></div>
+    </div>
+    <div class="legend">
+      <span><i class="sw-none"></i>нет</span>
+      <span><i class="sw-inflight"></i>частично</span>
+      <span><i class="sw-have"></i>есть</span>
+      <span><i class="sw-peer"></i>второй волной</span>
+    </div>
+  </section>
+
+  <div class="two">
+    <section class="sec sec--tight">
+      <div class="sec-h"><span class="n">04</span><h2>опись груза</h2><span class="rule"></span><span class="aside" data-t="rxListNote"></span></div>
+      <div class="files" id="rx-files"></div>
+    </section>
+    <section class="sec sec--tight">
+      <div class="sec-h"><span class="n">05</span><h2>место выгрузки</h2><span class="rule"></span></div>
+      <div class="kvs" id="rx-place"></div>
+      <p class="caption" data-t="placeNote"></p>
+    </section>
+  </div>
+
+  <footer class="sheet-foot">
+    <p class="caption caption--2" style="max-width: 72ch" data-t="rxFoot"></p>
+    <span class="grow"></span>
+    <button type="button" class="btn" id="rx-stop">Остановить приём</button>
+    <button type="button" class="btn btn-p" id="rx-resume" hidden>Продолжить приём</button>
+  </footer>
+</article>
+
+<!-- ============ R5: доставлено ============ -->
+<article class="sheet" id="v-done" hidden>
+  <header class="sheet-head">
+    <div class="brand">
+      <div class="brand-row"><a class="brand-name" href="/">Ferry</a><svg viewBox="0 0 104 20" width="83" height="16" aria-hidden="true">
+          <path d="M0 3 Q52 12 104 3" stroke="#5a7181" stroke-width="1" fill="none"></path>
+          <g transform="translate(2 4.5)"><rect width="16" height="12" fill="#e8eef2"></rect><path d="M8 0 L16 6 L8 12 L0 6 Z" fill="#ff6a1f"></path></g>
+          <g transform="translate(22 6.5)"><rect width="16" height="6" fill="#5a7181"></rect><rect y="6" width="16" height="6" fill="#ff6a1f"></rect></g>
+          <g transform="translate(42 7.5)"><rect width="16" height="12" fill="#ff6a1f"></rect><rect x="6.5" width="3" height="12" fill="#e5a32a"></rect><rect y="4.5" width="16" height="3" fill="#e5a32a"></rect></g>
+          <g transform="translate(62 7)"><rect width="16" height="12" fill="#ff6a1f"></rect><rect x="6.5" width="3" height="12" fill="#e5a32a"></rect><rect y="4.5" width="16" height="3" fill="#e5a32a"></rect></g>
+          <g transform="translate(82 5)"><rect width="16" height="12" fill="#e5a32a"></rect><path d="M3 0H6L0 6V3Z M9 0H12L0 12V9Z M15 0H16V2L6 12H3Z M16 5V8L12 12H9Z" fill="#ff6a1f"></path></g>
+        </svg></div>
+      <span class="eyebrow">отметка о доставке</span>
+    </div>
+    <span class="grow"></span>
+    <div class="head-id"><span class="eyebrow">раздача</span><span class="v" data-t="id"></span></div>
+    <div class="stamp stamp--ok"><b>доставлено</b><small>проверено BLAKE3</small></div>
+  </header>
+
+  <div class="sec sec--tight">
+    <p class="lead" data-t="doneLead">Готово. Том у вашего причала.</p>
+    <p class="okline"><svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10.5 L8 14.5 L16 5.5"></path></svg><span data-t="doneOk"></span></p>
+  </div>
+
+  <div class="two">
+    <section class="sec sec--tight">
+      <div class="sec-h"><span class="n">01</span><h2>итог рейса</h2><span class="rule"></span></div>
+      <div class="kvs" id="done-kv"></div>
+      <div class="sec sec--tight" id="done-src" hidden>
+        <span class="label" style="margin-top: 10px">откуда пришло</span>
+        <div class="srcbar" aria-hidden="true"><i class="sw-have" data-src="window"></i><i class="sw-peer" data-src="peers"></i><i class="sw-sender" data-src="sender"></i></div>
+        <div class="legend">
+          <span>из окна сервера <b data-t="srcWindow">0 %</b></span>
+          <span>от других получателей <b class="v--seed" data-t="srcPeers">0 %</b></span>
+          <span>от отправителя <b data-t="srcSender">0 %</b></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec">
+      <div class="sec-h"><span class="n">02</span><h2>место выгрузки</h2><span class="rule"></span></div>
+      <div class="place">
+        <svg viewBox="0 0 20 20" width="22" height="22" aria-hidden="true" fill="none" stroke="#a8b7c2" stroke-width="1.5" stroke-linejoin="round"><path d="M2.5 5.5 V15.5 H17.5 V7.5 H9.5 L7.5 5.5 Z"></path></svg>
+        <div class="place-t"><span class="v" data-t="placeName"></span><span class="caption" data-t="placeSub"></span></div>
+      </div>
+      <div class="bar" id="exp-bar" hidden><i></i></div>
+      <div class="banner banner--danger" id="exp-err" hidden role="alert"><p><span data-t="expErr"></span><small data-t="expErrSub"></small></p></div>
+      <div class="btns">
+        <button type="button" class="btn btn-p" id="exp-go" hidden></button>
+        <button type="button" class="btn" id="exp-alt" hidden></button>
+        <button type="button" class="btn" id="done-list">Показать опись</button>
+      </div>
+      <div class="files files--all" id="done-files" hidden></div>
+
+      <div class="sec-h" style="margin-top: 18px"><span class="n">03</span><h2>остаться на рейде</h2><span class="rule"></span></div>
+      <div class="switch-row">
+        <button type="button" role="switch" class="switch" id="seed-sw" aria-checked="false" aria-labelledby="seed-t"><i></i></button>
+        <span class="switch-t">
+          <b id="seed-t">Раздавать другим, пока открыта вкладка</b>
+          <span data-t="seedText">Те, кто подключится позже, возьмут начало тома у вас — отправителю не придётся отдавать его второй раз.</span>
+          <span class="role" id="seed-role"><i></i><span data-t="seedRole"></span></span>
+        </span>
+      </div>
+    </section>
+  </div>
+
+  <footer class="sheet-foot">
+    <p class="caption caption--2" style="max-width: 72ch" data-t="doneFoot"></p>
+    <span class="grow"></span>
+    <button type="button" class="btn" id="done-close">Закрыть</button>
+  </footer>
+</article>
+
+<!-- ============ отказ ============ -->
+<div class="err-wrap" id="v-err" hidden>
+  <header class="sheet-head">
+    <div class="brand">
+      <div class="brand-row"><a class="brand-name" href="/">Ferry</a><svg viewBox="0 0 104 20" width="83" height="16" aria-hidden="true">
+          <path d="M0 3 Q52 12 104 3" stroke="#5a7181" stroke-width="1" fill="none"></path>
+          <g transform="translate(2 4.5)"><rect width="16" height="12" fill="#e8eef2"></rect><path d="M8 0 L16 6 L8 12 L0 6 Z" fill="#ff6a1f"></path></g>
+          <g transform="translate(22 6.5)"><rect width="16" height="6" fill="#5a7181"></rect><rect y="6" width="16" height="6" fill="#ff6a1f"></rect></g>
+          <g transform="translate(42 7.5)"><rect width="16" height="12" fill="#ff6a1f"></rect><rect x="6.5" width="3" height="12" fill="#e5a32a"></rect><rect y="4.5" width="16" height="3" fill="#e5a32a"></rect></g>
+          <g transform="translate(62 7)"><rect width="16" height="12" fill="#ff6a1f"></rect><rect x="6.5" width="3" height="12" fill="#e5a32a"></rect><rect y="4.5" width="16" height="3" fill="#e5a32a"></rect></g>
+          <g transform="translate(82 5)"><rect width="16" height="12" fill="#e5a32a"></rect><path d="M3 0H6L0 6V3Z M9 0H12L0 12V9Z M15 0H16V2L6 12H3Z M16 5V8L12 12H9Z" fill="#ff6a1f"></path></g>
+        </svg></div>
+      <span class="eyebrow">отказ в перевозке</span>
+    </div>
+    <span class="grow"></span>
+    <div class="head-id"><span class="eyebrow">раздача</span><span class="v" data-t="id"></span></div>
+  </header>
+  <article class="err-card" aria-labelledby="err-title">
+<div class="err-pic" data-pic="key" hidden aria-hidden="true" style="position: relative; height: 200px; overflow: hidden; background: linear-gradient(180deg, #080c10 0%, #0f1820 70%, #17232c 100%)">
+        <svg viewBox="0 0 560 200" preserveAspectRatio="xMidYMid slice" width="100%" height="200" style="display: block">
+          <g fill="#e8eef2" opacity=".45"><circle cx="40" cy="30" r="1"></circle><circle cx="120" cy="60" r="1.2"></circle><circle cx="470" cy="24" r="1"></circle><circle cx="520" cy="80" r="1.3"></circle><circle cx="300" cy="18" r="0.9"></circle></g>
+          <rect x="170" y="62" width="180" height="96" fill="#19242d" stroke="#5a7181" stroke-width="1.5"></rect>
+          <path d="M184 70 V150 M198 70 V150 M212 70 V150 M226 70 V150 M240 70 V150 M254 70 V150 M268 70 V150 M282 70 V150 M296 70 V150 M310 70 V150 M324 70 V150 M338 70 V150" stroke="#22303a" stroke-width="2"></path>
+          <path d="M260 62 V158" stroke="#5a7181" stroke-width="1.5"></path>
+          <rect x="264" y="98" width="20" height="5" fill="#5a7181"></rect>
+          <path d="M268 118 V110 Q276 100 284 110 V118" fill="none" stroke="#e5a32a" stroke-width="2.2"></path>
+          <rect x="264" y="118" width="24" height="20" fill="#22303a" stroke="#e5a32a" stroke-width="1.5"></rect>
+          <circle cx="276" cy="126" r="2.4" fill="#e5a32a"></circle><path d="M276 128 V133" stroke="#e5a32a" stroke-width="2"></path>
+          <g class="fx-float" style="transform-box: fill-box; transform-origin: center">
+            <circle cx="420" cy="92" r="18" fill="none" stroke="#f0b95a" stroke-width="2" stroke-dasharray="4 4"></circle>
+            <text x="420" y="99" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="20" font-weight="600" fill="#f0b95a">#</text>
+            <path d="M438 92 H486 M470 92 V102 M480 92 V100" fill="none" stroke="#f0b95a" stroke-width="2" stroke-dasharray="4 4"></path>
+          </g>
+          <text x="420" y="138" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-style="italic" font-size="12" fill="#7e93a2">ключ остался у отправителя</text>
+        </svg>
+        <div style="position: absolute; left: 0; right: 0; bottom: 0; height: 40px; overflow: hidden">
+          <svg class="fx-wave" viewBox="0 0 2880 40" preserveAspectRatio="none" style="display: block; width: 200%; height: 40px"><path d="M0 10 Q30 6 60 10 T120 10 T180 10 T240 10 T300 10 T360 10 T420 10 T480 10 T540 10 T600 10 T660 10 T720 10 T780 10 T840 10 T900 10 T960 10 T1020 10 T1080 10 T1140 10 T1200 10 T1260 10 T1320 10 T1380 10 T1440 10 T1500 10 T1560 10 T1620 10 T1680 10 T1740 10 T1800 10 T1860 10 T1920 10 T1980 10 T2040 10 T2100 10 T2160 10 T2220 10 T2280 10 T2340 10 T2400 10 T2460 10 T2520 10 T2580 10 T2640 10 T2700 10 T2760 10 T2820 10 T2880 10 V40 H0 Z" fill="#121a21"></path></svg>
+        </div>
+      </div>
+<div class="err-pic" data-pic="fog" hidden aria-hidden="true" style="position: relative; height: 200px; overflow: hidden; background: linear-gradient(180deg, #0c1217 0%, #151f27 62%, #1e2b35 100%)">
+        <svg viewBox="0 0 560 200" preserveAspectRatio="xMidYMid slice" width="100%" height="200" style="display: block">
+          <path d="M0 128 H560" stroke="#2a3a46" stroke-width="1"></path>
+          <g class="fx-away" style="transform-box: fill-box; transform-origin: center">
+            <g transform="translate(390 108) scale(.5)">
+              <path d="M70 54 L74 26 H93 L95 54 Z" fill="#3d505c"></path><path d="M73.2 32 H93.8 L94.6 39 H72.2 Z" fill="#ff6a1f"></path>
+              <rect x="38" y="54" width="128" height="22" fill="#5a7181"></rect><rect x="116" y="38" width="50" height="16" fill="#7e93a2"></rect>
+              <path d="M6 76 H230 L213 108 Q210 112 203 112 H32 Q24 112 20 106 Z" fill="#121a21"></path>
+              <circle cx="140" cy="10" r="3" fill="#ff8c47"></circle><path d="M140 38 V12" stroke="#5a7181" stroke-width="1.5"></path>
+            </g>
+          </g>
+          <rect x="0" y="134" width="210" height="10" fill="#22303a"></rect>
+          <path d="M20 144 V200 M70 144 V200 M120 144 V200 M170 144 V200" stroke="#19242d" stroke-width="6"></path>
+          <rect x="188" y="122" width="10" height="12" fill="#5a7181"></rect>
+          <path d="M193 124 Q208 150 228 160 Q240 166 250 158" fill="none" stroke="#7e93a2" stroke-width="1.4"></path>
+          <rect x="40" y="114" width="22" height="20" fill="#121a21"></rect><rect x="62" y="104" width="10" height="30" fill="#121a21"></rect>
+          <path d="M100 134 V96" stroke="#5a7181" stroke-width="1.5"></path><circle cx="100" cy="94" r="3" fill="#3d505c"></circle>
+        </svg>
+        <div class="fx-fog" style="position: absolute; left: -60px; top: 96px; width: 420px; height: 24px; border-radius: 50%; background: rgba(168, 183, 194, 0.08); filter: blur(8px)"></div>
+        <div class="fx-fog" style="animation-delay: -12s; position: absolute; left: 180px; top: 120px; width: 360px; height: 20px; border-radius: 50%; background: rgba(168, 183, 194, 0.07); filter: blur(8px)"></div>
+        <div style="position: absolute; left: 0; right: 0; bottom: 0; height: 40px; overflow: hidden">
+          <svg class="fx-wave" viewBox="0 0 2880 40" preserveAspectRatio="none" style="display: block; width: 200%; height: 40px; animation-duration: 40s"><path d="M0 10 Q30 6 60 10 T120 10 T180 10 T240 10 T300 10 T360 10 T420 10 T480 10 T540 10 T600 10 T660 10 T720 10 T780 10 T840 10 T900 10 T960 10 T1020 10 T1080 10 T1140 10 T1200 10 T1260 10 T1320 10 T1380 10 T1440 10 T1500 10 T1560 10 T1620 10 T1680 10 T1740 10 T1800 10 T1860 10 T1920 10 T1980 10 T2040 10 T2100 10 T2160 10 T2220 10 T2280 10 T2340 10 T2400 10 T2460 10 T2520 10 T2580 10 T2640 10 T2700 10 T2760 10 T2820 10 T2880 10 V40 H0 Z" fill="#121a21"></path></svg>
+        </div>
+      </div>
+<div class="err-pic" data-pic="buoys" hidden aria-hidden="true" style="position: relative; height: 200px; overflow: hidden; background: linear-gradient(180deg, #080c10 0%, #0f1820 70%, #17232c 100%)">
+        <svg viewBox="0 0 560 200" preserveAspectRatio="xMidYMid slice" width="100%" height="200" style="display: block">
+          <g fill="#e8eef2" opacity=".4"><circle cx="60" cy="24" r="1"></circle><circle cx="200" cy="40" r="1.2"></circle><circle cx="510" cy="30" r="1"></circle></g>
+          <rect x="470" y="128" width="90" height="10" fill="#22303a"></rect>
+          <path d="M480 138 V200 M520 138 V200" stroke="#19242d" stroke-width="6"></path>
+          <text x="514" y="116" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="13" fill="#f0b95a">8 / 8</text>
+          <g fill="#05080b" stroke="#5a7181" stroke-width="1">
+            <path d="M440 132 H466 L463 138 H443 Z"></path><path d="M408 132 H434 L431 138 H411 Z"></path><path d="M376 132 H402 L399 138 H379 Z"></path><path d="M344 132 H370 L367 138 H347 Z"></path>
+            <path d="M312 132 H338 L335 138 H315 Z"></path><path d="M280 132 H306 L303 138 H283 Z"></path><path d="M248 132 H274 L271 138 H251 Z"></path><path d="M216 132 H242 L239 138 H219 Z"></path>
+          </g>
+          <g fill="#7e93a2"><rect x="446" y="127" width="10" height="5"></rect><rect x="414" y="127" width="10" height="5"></rect><rect x="382" y="127" width="10" height="5"></rect><rect x="350" y="127" width="10" height="5"></rect><rect x="318" y="127" width="10" height="5"></rect><rect x="286" y="127" width="10" height="5"></rect><rect x="254" y="127" width="10" height="5"></rect><rect x="222" y="127" width="10" height="5"></rect></g>
+          <path d="M118 138 L122 116 H130 L134 138 Z" fill="#e5a32a"></path><rect x="120" y="124" width="12" height="4" fill="#e8eef2"></rect>
+          <path d="M126 116 V106" stroke="#5a7181"></path><circle class="fx-pulse" cx="126" cy="104" r="3" fill="#6f8697"></circle>
+          <path d="M126 138 Q110 140 96 136" stroke="#7e93a2" fill="none"></path>
+          <g class="fx-rock">
+            <path d="M48 130 H92 L88 140 Q87 142 85 142 H54 Q52 142 51 140 Z" fill="#05080b" stroke="#a8b7c2" stroke-width="1.2"></path>
+            <rect x="58" y="122" width="20" height="8" fill="#a8b7c2"></rect>
+            <path d="M50 134.5 H90.5 L89.5 136.5 H51 Z" fill="#6f8697"></path>
+          </g>
+          <text x="70" y="166" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="12" fill="#a8b7c2">вы</text>
+        </svg>
+        <div style="position: absolute; left: 0; right: 0; bottom: 0; height: 40px; overflow: hidden">
+          <svg class="fx-wave" viewBox="0 0 2880 40" preserveAspectRatio="none" style="display: block; width: 200%; height: 40px; animation-duration: 30s"><path d="M0 10 Q30 6 60 10 T120 10 T180 10 T240 10 T300 10 T360 10 T420 10 T480 10 T540 10 T600 10 T660 10 T720 10 T780 10 T840 10 T900 10 T960 10 T1020 10 T1080 10 T1140 10 T1200 10 T1260 10 T1320 10 T1380 10 T1440 10 T1500 10 T1560 10 T1620 10 T1680 10 T1740 10 T1800 10 T1860 10 T1920 10 T1980 10 T2040 10 T2100 10 T2160 10 T2220 10 T2280 10 T2340 10 T2400 10 T2460 10 T2520 10 T2580 10 T2640 10 T2700 10 T2760 10 T2820 10 T2880 10 V40 H0 Z" fill="#121a21"></path></svg>
+        </div>
+      </div>
+<div class="err-pic" data-pic="storm" hidden aria-hidden="true" style="position: relative; height: 200px; overflow: hidden; background: linear-gradient(180deg, #0a0f13 0%, #121a21 60%, #19242d 100%)">
+        <svg viewBox="0 0 560 200" preserveAspectRatio="xMidYMid slice" width="100%" height="200" style="display: block">
+          <g fill="#19242d"><ellipse cx="120" cy="30" rx="120" ry="34"></ellipse><ellipse cx="280" cy="18" rx="140" ry="36"></ellipse><ellipse cx="450" cy="34" rx="150" ry="38"></ellipse></g>
+          <g fill="#22303a"><ellipse cx="200" cy="44" rx="90" ry="20"></ellipse><ellipse cx="400" cy="50" rx="100" ry="18"></ellipse></g>
+          <g class="fx-rain" stroke="#5a7181" stroke-width="1" opacity=".6">
+            <path d="M40 60 L32 80 M90 70 L82 90 M140 56 L132 76 M190 74 L182 94 M240 62 L232 82 M290 70 L282 90 M340 58 L332 78 M390 72 L382 92 M440 60 L432 80 M490 70 L482 90 M540 62 L532 82"></path>
+            <path d="M60 100 L52 120 M110 110 L102 130 M160 96 L152 116 M210 112 L202 132 M260 100 L252 120 M310 108 L302 128 M360 98 L352 118 M410 110 L402 130 M460 100 L452 120 M510 112 L502 132"></path>
+          </g>
+          <path d="M466 200 Q472 176 486 172 Q500 166 514 172 Q530 178 536 200 Z" fill="#0c1318"></path>
+          <path d="M494 92 H508 L513 176 H489 Z" fill="#7e93a2"></path>
+          <path d="M492.4 110 H509.6 L510.4 122 H491.6 Z" fill="#c8332e"></path>
+          <rect x="492" y="80" width="18" height="12" fill="#22303a"></rect>
+          <circle class="fx-blink" cx="501" cy="86" r="4" fill="#ff8a80"></circle>
+          <path d="M489 80 L501 70 L513 80 Z" fill="#22303a"></path>
+        </svg>
+        <div class="fx-flash" style="position: absolute; inset: 0; background: #e8eef2"></div>
+        <div style="position: absolute; left: 0; right: 0; bottom: 0; height: 52px; overflow: hidden">
+          <svg class="fx-wave" viewBox="0 0 2880 80" preserveAspectRatio="none" style="display: block; width: 200%; height: 52px; animation-duration: 9s"><path d="M0 26 Q80 6 160 26 T320 26 T480 26 T640 26 T800 26 T960 26 T1120 26 T1280 26 T1440 26 T1600 26 T1760 26 T1920 26 T2080 26 T2240 26 T2400 26 T2560 26 T2720 26 T2880 26 V80 H0 Z" fill="#121a21" stroke="rgba(168,183,194,.25)" stroke-width="1.5" vector-effect="non-scaling-stroke"></path></svg>
+        </div>
+      </div>
+    <div class="err-body">
+      <div class="err-code" id="err-code"><code data-t="errCode"></code><span class="grow"></span><span class="tag" data-t="errTag"></span></div>
+      <h1 id="err-title" data-t="errTitle"></h1>
+      <p data-t="errText"></p>
+      <p class="okline" id="err-saved" hidden><span data-t="errSaved"></span></p>
+      <div class="err-exit"><span class="k">выход</span><span class="dots"></span><span class="v" data-t="errExit"></span></div>
+      <form class="field-row" id="err-link" hidden>
+        <div class="field"><label for="err-link-in">ссылка целиком</label><input id="err-link-in" type="url" autocomplete="off" spellcheck="false" placeholder="https://…/t/…#…"></div>
+        <button type="submit" class="btn btn-p">Открыть</button>
+      </form>
+      <div class="btns" id="err-btns"></div>
+      <p class="err-detail" data-t="errDetail"></p>
+    </div>
+  </article>
+  <details class="more" data-cli id="err-cli" hidden>
+    <summary>Забрать из терминала</summary>
+    <div>
+      <p class="caption caption--2">Клиент Ferry принимает тот же том тем же ключом.</p>
+      <pre class="term"><span class="pr">$ </span><span data-t="cliCmd"></span></pre>
+      <div class="btns"><button type="button" class="btn" data-copy="cliCmd">Скопировать команду</button></div>
+      <p class="caption">Клиента ещё нет? Одна команда: <span class="mono" data-t="installCmd"></span></p>
+    </div>
+  </details>
+</div>
+
+</div>
 </body>
 </html>

@@ -191,9 +191,17 @@ void HttpFileServer::serveFile(QTcpSocket *socket, const HttpRequest &req)
     const bool volatileAsset = rel.startsWith(QLatin1String("/dl/"))
                                || rel == QLatin1String("/install.sh")
                                || rel == QLatin1String("/install.ps1");
-    const QByteArray cache = (!volatileAsset && rel.startsWith(QLatin1String("/assets/")))
-                                 ? QByteArrayLiteral("public, max-age=86400")
-                                 : QByteArrayLiteral("no-store");
+    // Сутки кэша — только шрифтам: они не меняются. Скрипты и стили
+    // страницы приёма обновляются вместе с сервером, а модули тянут друг
+    // друга по относительным путям — номер версии к ним не приклеить, и
+    // вчерашний воркер со свежей страницей разошлись бы в сообщениях.
+    // no-cache — не «не хранить», а «сверяйся»: при Connection: close и без
+    // ETag это повторная загрузка, ~200 КБ на открытие ссылки.
+    QByteArray cache = QByteArrayLiteral("no-store");
+    if (!volatileAsset && rel.startsWith(QLatin1String("/assets/fonts/")))
+        cache = QByteArrayLiteral("public, max-age=86400");
+    else if (!volatileAsset && rel.startsWith(QLatin1String("/assets/")))
+        cache = QByteArrayLiteral("no-cache");
 
     QByteArray body = file.readAll();
 
