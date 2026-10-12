@@ -7,7 +7,7 @@
 // Ключ из фрагмента не уходит никуда, кроме воркера этой же вкладки: ни в
 // запросы, ни в логи, ни в Referer.
 
-import { parseLink, fetchMeta } from './api.js';
+import { parseLink, joinLinkKey, fetchMeta } from './api.js';
 import { cryptoAvailable } from './crypto.js';
 import { openVolume } from './volume.js';
 import { summarize } from './manifest.js';
@@ -861,7 +861,7 @@ async function startWorker() {
         port = ch.port1;
     }
 
-    const w = new Worker('/assets/js/receive.worker.js', { type: 'module' });
+    const w = new Worker(new URL('./receive.worker.js', import.meta.url), { type: 'module' });
     S.worker = w;
     w.onmessage = (e) => {
         if (w !== S.worker)
@@ -1768,7 +1768,7 @@ function wire() {
     };
     $('#err-link').addEventListener('submit', (e) => {
         e.preventDefault();
-        const v = $('#err-link-in').value.trim();
+        const v = joinLinkKey($('#err-link-in').value);
         // Ключ могли прислать отдельно от ссылки — тогда вставляют только
         // его: 43 знака base64url, те самые, что стоят после #.
         const key = v.replace(/\s+/g, '').replace(/^#/, '');
@@ -1789,6 +1789,13 @@ function wire() {
         }
     });
     $('#err-link-in').addEventListener('input', (e) => e.target.setCustomValidity(''));
+    // Ключ могут дописать прямо в адресную строку, после ссылки. Смена одного
+    // якоря — переход внутри страницы: сама она не перечитается и осталась бы
+    // на «Ссылка неполная». Пока приём не начат, открываем её с новым ключом.
+    window.addEventListener('hashchange', () => {
+        if (location.hash.slice(1) !== S.keyText && ['boot', 'preview', 'err'].includes(S.view))
+            location.reload();
+    });
 
     window.addEventListener('online', () => {
         if (S.worker)

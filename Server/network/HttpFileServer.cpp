@@ -1,7 +1,10 @@
 #include "network/HttpFileServer.h"
 
+#include <QCryptographicHash>
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
@@ -178,6 +181,22 @@ void HttpFileServer::serveFile(QTcpSocket *socket, const HttpRequest &req)
     if (rel.startsWith(QLatin1String("/t/")))
         rel = QStringLiteral("/t.html");
 
+    // /assets/v-<версия>/js/app.js — тот же файл, что /assets/js/app.js.
+    // Версию в пути ставит страница (см. ниже), модули тянут друг друга
+    // по относительным путям и остаются в той же версии. Отдаём текущий
+    // файл, какая бы версия ни была в пути: страница, открытая до
+    // обновления, лучше получит новый воркер, чем 404.
+    bool versioned = false;
+    if (rel.startsWith(QLatin1String("/assets/v-"))) {
+        const int slash = rel.indexOf(QLatin1Char('/'), 10);
+        if (slash < 0) {
+            sendResponse(socket, 404, statusText(404), "text/plain; charset=utf-8", "404 Not Found");
+            return;
+        }
+        rel = QStringLiteral("/assets") + rel.mid(slash);
+        versioned = true;
+    }
+
     // Сравниваем с корнем вместе с разделителем: голый startsWith пропустил
     // бы соседнюю папку с тем же началом имени (/x/web → /x/web-private).
     const QString full = QDir::cleanPath(m_root + rel);
@@ -205,13 +224,24 @@ void HttpFileServer::serveFile(QTcpSocket *socket, const HttpRequest &req)
     // вчерашний воркер со свежей страницей разошлись бы в сообщениях.
     // no-cache — не «не хранить», а «сверяйся»: при Connection: close и без
     // ETag это повторная загрузка, ~200 КБ на открытие ссылки.
+    //
+    // Но «сверяйся» соблюдают не все: Firefox держал вчерашний manifest.js
+    // рядом с сегодняшним cargo.js, и главная падала на импорте. Поэтому
+    // страницы ссылаются на ресурсы с версией в пути (её меняет любое
+    // обновление файлов), а такой адрес можно кэшировать надолго.
     QByteArray cache = QByteArrayLiteral("no-store");
-    if (!volatileAsset && rel.startsWith(QLatin1String("/assets/fonts/")))
+    if (!volatileAsset && versioned)
+        cache = QByteArrayLiteral("public, max-age=31536000, immutable");
+    else if (!volatileAsset && rel.startsWith(QLatin1String("/assets/fonts/")))
         cache = QByteArrayLiteral("public, max-age=86400");
     else if (!volatileAsset && rel.startsWith(QLatin1String("/assets/")))
         cache = QByteArrayLiteral("no-cache");
 
     QByteArray body = file.readAll();
+
+    // Страницы (no-store, всегда свежие) ведут на ресурсы своей версии.
+    if (rel.endsWith(QLatin1String(".html")))
+        body.replace("\"/assets/", "\"/assets/v-" + assetsVersion() + '/');
 
     // Установщик клиента — единственный файл, который отдаётся не как
     // есть. В него подставляется адрес, по которому человек СЕЙЧАС пришёл:
@@ -254,6 +284,26 @@ void HttpFileServer::serveFile(QTcpSocket *socket, const HttpRequest &req)
     }
 
     sendResponse(socket, 200, statusText(200), mimeFor(full), body, cache);
+}
+
+QByteArray HttpFileServer::assetsVersion() const
+{
+    // Считается на каждую страницу: это несколько десятков stat, дешевле
+    // любого способа узнать, что файлы подменили без перезапуска.
+    const QString base = m_root + QStringLiteral("/assets");
+    QStringList lines;
+    QDirIterator it(base, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        it.next();
+        const QFileInfo fi = it.fileInfo();
+        lines << QStringLiteral("%1|%2|%3").arg(fi.filePath().mid(base.size()))
+                                         .arg(fi.size())
+                                         .arg(fi.lastModified().toMSecsSinceEpoch());
+    }
+    lines.sort();
+    const QByteArray digest = QCryptographicHash::hash(lines.join(QLatin1Char('\n')).toUtf8(),
+                                                       QCryptographicHash::Sha256);
+    return digest.toHex().left(12);
 }
 
 void HttpFileServer::sendApiResponse(QTcpSocket *socket, const ApiResponse &resp)

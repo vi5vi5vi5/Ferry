@@ -53,6 +53,26 @@ export function parseLink(text) {
     return { origin: url.origin, id, key, badKey: false };
 }
 
+// Ссылку и ключ могли прислать двумя сообщениями и вставить разом:
+// «https://…/t/<id>», пробел или перевод строки, ключ (можно с #). Тогда
+// склеиваем их в одну ссылку; всё остальное возвращаем как было.
+// Chromium, вставляя две строки в однострочное поле, выбрасывает перевод
+// строки, и ключ прилипает к id — такую склейку тоже разнимаем.
+export function joinLinkKey(text) {
+    const v = String(text || '').trim();
+    const glued = /^(https?:\/\/[^\s#]+\/t\/)([A-Za-z0-9_-]{22})#?([A-Za-z0-9_-]{43})$/.exec(v);
+    if (glued && isValidTransferId(glued[2]))
+        return `${glued[1]}${glued[2]}#${glued[3]}`;
+    const parts = v.split(/\s+/);
+    if (parts.length !== 2)
+        return v;
+    const l = parseLink(parts[0]);
+    const key = parts[1].replace(/^#/, '');
+    if (!l || l.key || l.badKey || !/^[A-Za-z0-9_-]{43}$/.test(key))
+        return v;
+    return `${parts[0].replace(/#$/, '')}#${key}`;
+}
+
 async function readError(resp) {
     try {
         const body = await resp.json();

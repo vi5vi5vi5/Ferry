@@ -234,8 +234,8 @@ class View {
             password = { key, salt };
         }
         const ch = new MessageChannel();
-        const hasher = new Worker('/assets/js/hash.worker.js', { type: 'module' });
-        const worker = new Worker('/assets/js/send.worker.js', { type: 'module' });
+        const hasher = new Worker(new URL('./hash.worker.js', import.meta.url), { type: 'module' });
+        const worker = new Worker(new URL('./send.worker.js', import.meta.url), { type: 'module' });
         this.workers = [hasher, worker];
         this.worker = worker;
         worker.onmessage = (e) => this.onEvent(e.data);

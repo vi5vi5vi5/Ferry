@@ -5,7 +5,7 @@
 // в этой же странице — главную сменяет накладная (sendview.js), а файлы
 // читаются с диска по мере того, как их просит релей.
 
-import { parseLink, fetchMeta } from './api.js';
+import { parseLink, joinLinkKey, fetchMeta } from './api.js';
 import { cryptoAvailable } from './crypto.js';
 import { cargoFromFileList, cargoFromDrop, dropEntries, CargoError } from './cargo.js';
 import { chunkSizeFor } from './manifest.js';
@@ -399,7 +399,7 @@ function wire() {
     $('#get-form').addEventListener('submit', (e) => {
         e.preventDefault();
         const input = $('#get-in');
-        const v = input.value.trim();
+        const v = joinLinkKey(input.value);
         const hint = $('#get-hint');
         // Ссылку владельца тоже можно вставить сюда: она ведёт на эту же
         // страницу, только с другим фрагментом.
