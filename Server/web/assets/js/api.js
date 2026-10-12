@@ -106,6 +106,8 @@ export async function fetchMeta(origin, id) {
         manifest: decodeField(v, 'manifest'),
         hashList: v.hash_mode === 'stream' ? null : decodeField(v, 'hash_list'),
         noncePrefix: decodeField(v, 'nonce_prefix', NONCE_PREFIX_SIZE),
+        // Раздача по паролю: соль Argon2id, не секрет.
+        salt: v.mode === 'password' ? decodeField(v, 'salt', 16) : null,
     };
     return meta;
 }

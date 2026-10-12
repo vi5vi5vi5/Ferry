@@ -29,6 +29,9 @@ struct Options
     int uses = -1;              // -1 — без лимита
     int64_t ttlMs = 0;          // 0 — умолчание сервера
     int maxConcurrent = 0;      // 0 — умолчание сервера
+    bool approve = false;       // спрашивать меня перед тем, как пустить получателя
+    bool leaveOpen = false;     // после моего ухода раздача живёт на сидах
+    bool password = false;      // пароль вместо ключа в ссылке
 
     // get
     std::string link;           // полная ссылка

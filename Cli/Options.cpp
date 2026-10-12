@@ -146,6 +146,12 @@ Options Options::parse(const std::vector<std::string> &args)
             o.ttlMs = parseDurationMs(need("срок жизни, например 24h"));
         else if (arg == "--max-concurrent")
             o.maxConcurrent = std::atoi(need("получателей одновременно").c_str());
+        else if (arg == "--approve")
+            o.approve = true;
+        else if (arg == "--leave-open")
+            o.leaveOpen = true;
+        else if (arg == "--password")
+            o.password = true;
         else if (arg == "-o" || arg == "--output")
             o.outPath = need("путь");
         else if (arg == "--id")
@@ -202,12 +208,19 @@ void printHelp()
     std::printf("  --uses <N>            сколько раз ссылкой можно воспользоваться\n");
     std::printf("  --ttl <срок>          сколько живёт раздача: 90m, 24h, 7d\n");
     std::printf("  --max-concurrent <N>  сколько получателей одновременно\n");
+    std::printf("  --approve             спрашивать меня, прежде чем пустить получателя\n");
+    std::printf("  --leave-open          после Ctrl-C раздача живёт без меня, пока на связи\n"
+                "                        кто-то, скачавший том целиком\n");
+    std::printf("  --password            пароль вместо ключа: ссылка уходит без ключа,\n"
+                "                        пароль передаётся отдельно (или FERRY_PASSWORD)\n");
     std::printf("  --qr                  напечатать QR ссылки — для телефона\n\n");
     std::printf("Ключи get:\n");
     std::printf("  -o, --output <путь>   куда положить\n");
     std::printf("  --id <id> --key <ключ>  если ссылка потеряла часть после решётки\n");
     std::printf("  -y, --yes             не спрашивать подтверждения\n");
-    std::printf("  --seed                после приёма остаться источником до Ctrl-C\n\n");
+    std::printf("  --seed                после приёма остаться источником до Ctrl-C\n");
+    std::printf("  %sпароль к раздаче спросится сам; для скриптов — FERRY_PASSWORD%s\n\n",
+                dim(), reset());
     std::printf("Общие:\n");
     std::printf("  --relay <адрес>       адрес релея (иначе из файла настроек)\n");
     std::printf("  --name <имя>          как представиться отправителю\n");

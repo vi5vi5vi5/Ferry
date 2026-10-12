@@ -196,6 +196,17 @@ bool apiFetchMeta(const Relay &relay, const std::string &id, TransferMeta &out, 
     out.receivers = int(v["receivers"].toInt(0));
     out.usesLeft = int(v["uses_left"].toInt(-1));
     out.expiresInMs = v["expires_in_ms"].toInt(0);
+    out.requireApproval = v["require_approval"].toBool(false);
+    out.salt.clear();
+    if (out.mode == "password") {
+        if (!decodeField(v, "salt", out.salt, err))
+            return false;
+        if (out.salt.size() != kPasswordSaltSize) {
+            if (err)
+                *err = "сервер прислал соль пароля не той длины";
+            return false;
+        }
+    }
 
     out.streamHashes = v["hash_mode"].toString() == "stream";
     out.hashed = uint64_t(std::max<int64_t>(0, v["hashed"].toInt(0)));
@@ -278,10 +289,12 @@ std::string explainError(const std::string &code)
         return "сейчас качают столько человек, сколько разрешил отправитель. "
                "Попробуйте через несколько минут.";
     if (code == err::kApprovalDenied)
-        return "отправитель не пустил.";
+        return "отправитель не пустил. Если это ошибка — напишите ему.";
     if (code == err::kSenderGone)
-        return "отправитель отключился. В этой версии раздача живёт, только "
-               "пока запущен ferry send на той стороне.";
+        return "отправитель отключился, и раздавать больше некому: никто из "
+               "скачавших целиком не остался на связи.";
+    if (code == err::kRevoked)
+        return "отправитель закрыл доступ к раздаче.";
     if (code == err::kNoSource)
         return "раздача уже идёт, и начало тома сервер отдать неоткуда. "
                "Подключаться к идущей раздаче научимся в следующей версии; "

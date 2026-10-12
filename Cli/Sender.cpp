@@ -10,6 +10,7 @@
 
 #include "Cli/ChunkPump.h"
 #include "Cli/Hasher.h"
+#include "Cli/Password.h"
 #include "Cli/Tree.h"
 #include "Cli/VolumeFile.h"
 #include "Cli/Signals.h"
@@ -69,6 +70,85 @@ struct PeerRow
     double progress = 0;
     std::string role;
 };
+
+// Кто ждёт решения владельца (--approve).
+struct Knock
+{
+    int id = 0;
+    std::string name;
+};
+
+// Ответ на «пустить?» одной клавишей. Латиница и та же клавиша в русской
+// раскладке; «д» — потому что «да». «н» нет нарочно: на русской
+// раскладке это клавиша Y, а по-русски — первая буква «нет».
+enum class Answer { None, Yes, No, All };
+Answer answerFor(int key)
+{
+    switch (key) {
+    case 'y': case 'Y': case 0x0434: case 0x0414:   // д Д
+        return Answer::Yes;
+    case 'n': case 'N': case 0x0442: case 0x0422:   // т Т — клавиша N
+        return Answer::No;
+    case 'a': case 'A': case 0x0444: case 0x0424:   // ф Ф — клавиша A
+        return Answer::All;
+    default:
+        return Answer::None;
+    }
+}
+
+// Ссылка владельца: открывает в браузере ту же раздачу с правами того,
+// кто её завёл, — добавить использований, продлить срок, закрыть доступ.
+// Всё после решётки, как и ключ: на сервер это не уходит, в журналы не
+// попадает. Ключ добавляется, чтобы страница могла показать саму ссылку
+// и QR; у раздачи по паролю ключа в ней нет.
+std::string manageLink(const TransferLink &link, const std::string &ownerToken, bool withKey)
+{
+    std::string out = link.origin() + "/#manage=" + link.id + "." + ownerToken;
+    if (withKey)
+        out += "." + base64UrlEncode(link.key.data(), link.key.size());
+    return out;
+}
+
+// Пароль для --password: из FERRY_PASSWORD или с клавиатуры, дважды.
+bool askNewPassword(std::string &out)
+{
+    if (const char *env = std::getenv("FERRY_PASSWORD")) {
+        out = normalizePassword(env);
+        const std::string problem = passwordProblem(out);
+        if (!problem.empty()) {
+            std::fprintf(stderr, "FERRY_PASSWORD не подходит: %s.\n", problem.c_str());
+            return false;
+        }
+        return true;
+    }
+    if (!platform::consoleStdinIsTty()) {
+        std::fprintf(stderr, "--password: пароль спрашивается с клавиатуры, а её нет. "
+                             "Для скриптов есть переменная FERRY_PASSWORD.\n");
+        return false;
+    }
+    std::fprintf(stderr, "Парольная фраза — пять слов и больше. Её передают голосом или\n"
+                         "другим мессенджером, отдельно от ссылки. Регистр, лишние пробелы\n"
+                         "и «ё» значения не имеют.\n");
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        std::string first, second;
+        if (!platform::consoleReadSecret("Фраза: ", first))
+            return false;
+        out = normalizePassword(first);
+        const std::string problem = passwordProblem(out);
+        if (!problem.empty()) {
+            std::fprintf(stderr, "Не подходит: %s.\n", problem.c_str());
+            continue;
+        }
+        if (!platform::consoleReadSecret("Ещё раз: ", second))
+            return false;
+        if (normalizePassword(second) != out) {
+            std::fprintf(stderr, "Фразы не совпали.\n");
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
 
 // Скользящая средняя скорости. Мгновенная скорость на чанках прыгает так,
 // что читать её невозможно; средняя за всё время, наоборот, не показывает,
@@ -198,13 +278,38 @@ int runSend(const Options &options, const Relay &relay)
         std::printf("\n");
     }
 
+    // Отвечать «пустить или нет» можно только с клавиатуры. Без неё
+    // каждый получатель стоял бы у двери до конца срока.
+    if (options.approve && !platform::consoleStdinIsTty()) {
+        std::fprintf(stderr, "--approve: решать, кого пускать, можно только из терминала, "
+                             "а ввод сюда перенаправлен.\n");
+        return 1;
+    }
+
     // ---- 2. Ключи ----
+    // Пароль спрашиваем ДО того, как заводить раздачу: черновик на релее
+    // живёт минуту, а человек может думать над фразой и дольше.
     bool ok = false;
-    const Key32 master = randomKey32(&ok);
+    Key32 master = randomKey32(&ok);
     if (!ok) {
         std::fprintf(stderr, "Системный генератор случайных чисел недоступен — "
                              "продолжать нельзя.\n");
         return 1;
+    }
+    Bytes passwordSalt;
+    if (options.password) {
+        std::string phrase;
+        if (!askNewPassword(phrase))
+            return 1;
+        if (!randomBytes(passwordSalt, kPasswordSaltSize)) {
+            std::fprintf(stderr, "Системный генератор случайных чисел недоступен.\n");
+            return 1;
+        }
+        std::printf("%sвывожу ключ из пароля (Argon2id, 64 МиБ)…%s\n", dim(), reset());
+        if (!passwordKey(phrase, passwordSalt.data(), passwordSalt.size(), master)) {
+            std::fprintf(stderr, "Не удалось вывести ключ из пароля: не хватило памяти?\n");
+            return 1;
+        }
     }
     const TransferKeys keys = TransferKeys::derive(master);
 
@@ -225,6 +330,22 @@ int runSend(const Options &options, const Relay &relay)
     }
     const int64_t createdAtMs = nowMs();
     const bool streamHashes = created.hasFeature(kFeatureStreamHashes);
+
+    // Ручки M4 требуют релея, который их понимает. Старый релей молча
+    // пропустил бы незнакомые поля политики — и человек думал бы, что
+    // его спросят, хотя пускать будут всех.
+    if ((options.approve || options.leaveOpen) && !created.hasFeature(kFeaturePolicy)) {
+        std::fprintf(stderr, "Этот релей не умеет %s. Обновите релей или отправьте без этого "
+                             "ключа.\n",
+                     options.approve ? "спрашивать отправителя (--approve)"
+                                     : "оставлять раздачу без отправителя (--leave-open)");
+        return 1;
+    }
+    if (options.password && !created.hasFeature(kFeaturePassword)) {
+        std::fprintf(stderr, "Этот релей не умеет раздачи по паролю. Обновите релей или "
+                             "отправьте без --password.\n");
+        return 1;
+    }
 
     // ---- 4. Хеши ----
     // На лету (релей умеет): считаются в фоне, ссылка появляется сразу, а
@@ -336,8 +457,9 @@ int runSend(const Options &options, const Relay &relay)
             }
             link.id = created.id;
         }
+        // По паролю ключа в ссылке нет: его выводят из пароля на той стороне.
         link.key = master;
-        link.hasKey = true;
+        link.hasKey = !options.password;
     }
 
     // ---- 5. Подключаемся и делаем offer ----
@@ -364,9 +486,24 @@ int runSend(const Options &options, const Relay &relay)
             offer.set("hash_mode", json::Value::make("stream"));
         else
             offer.set("hash_list", json::Value::make(b64(encHashes)));
-        offer.set("mode", json::Value::make("key"));
+        if (options.password) {
+            offer.set("mode", json::Value::make("password"));
+            offer.set("salt", json::Value::make(b64(passwordSalt)));
+        } else {
+            offer.set("mode", json::Value::make("key"));
+        }
 
         json::Value policy = json::Value::object();
+        if (options.approve)
+            policy.set("require_approval", json::Value::make(true));
+        if (options.leaveOpen) {
+            policy.set("leave_open", json::Value::make(true));
+            // Сказал «живи без меня» и «спрашивай меня» одновременно —
+            // после ухода спрашивать некого, и раздача пускает всех с
+            // ключом. Закрываться ему бы противоречило первому.
+            if (options.approve)
+                policy.set("on_owner_leave", json::Value::make("freeze"));
+        }
         if (options.uses > 0)
             policy.set("uses", json::Value::make(int64_t(options.uses)));
         if (options.ttlMs > 0)
@@ -464,14 +601,28 @@ int runSend(const Options &options, const Relay &relay)
 
     // ---- 6. Ссылка ----
     const std::string linkText = link.toString();
-    std::printf("\n%s%s%s\n", dim(), ruleTop("ссылка и ключ", cells).c_str(), reset());
-    std::printf("%s│%s %s%s%s\n", dim(), reset(), accent(), linkText.c_str(), reset());
-    std::printf("%s│%s\n", dim(), reset());
-    std::printf("%s│%s %sЧасть после решётки — это ключ. На сервер она не уходит.%s\n", dim(),
-                reset(), dim(), reset());
-    std::printf("%s│%s %sКто получил ссылку целиком — получил том.%s\n", dim(), reset(), dim(),
-                reset());
-    std::printf("%s%s%s\n", dim(), ruleBottom(cells).c_str(), reset());
+    if (options.password) {
+        std::printf("\n%s%s%s\n", dim(), ruleTop("ссылка без ключа", cells).c_str(), reset());
+        std::printf("%s│%s %s%s%s\n", dim(), reset(), accent(), linkText.c_str(), reset());
+        std::printf("%s│%s\n", dim(), reset());
+        std::printf("%s│%s %sКлюч выводится из пароля. Пароль передайте отдельно — голосом%s\n",
+                    dim(), reset(), dim(), reset());
+        std::printf("%s│%s %sили другим мессенджером.%s\n", dim(), reset(), dim(), reset());
+        std::printf("%s│%s %sЭтот режим слабее ключа: у кого ссылка, тот может перебирать%s\n",
+                    warn(), reset(), dim(), reset());
+        std::printf("%s│%s %sпароли сколько угодно, не спрашивая сервер.%s\n", warn(), reset(),
+                    dim(), reset());
+        std::printf("%s%s%s\n", dim(), ruleBottom(cells).c_str(), reset());
+    } else {
+        std::printf("\n%s%s%s\n", dim(), ruleTop("ссылка и ключ", cells).c_str(), reset());
+        std::printf("%s│%s %s%s%s\n", dim(), reset(), accent(), linkText.c_str(), reset());
+        std::printf("%s│%s\n", dim(), reset());
+        std::printf("%s│%s %sЧасть после решётки — это ключ. На сервер она не уходит.%s\n", dim(),
+                    reset(), dim(), reset());
+        std::printf("%s│%s %sКто получил ссылку целиком — получил том.%s\n", dim(), reset(),
+                    dim(), reset());
+        std::printf("%s%s%s\n", dim(), ruleBottom(cells).c_str(), reset());
+    }
 
     std::printf("\nЗабрать:  %sferry get \"%s\"%s\n", bold(), linkText.c_str(), reset());
     // В буфер — только когда рядом человек. Скрипту, который перенаправил
@@ -484,14 +635,22 @@ int runSend(const Options &options, const Relay &relay)
             std::printf("%s  (QR не поместился или вывод не в терминал)%s\n", dim(), reset());
     }
 
-    if (options.uses > 0 || options.ttlMs > 0) {
+    if (options.uses > 0 || options.ttlMs > 0 || options.approve || options.leaveOpen) {
         std::printf("\n%sполитика:%s ", dim(), reset());
         if (options.uses > 0)
             std::printf("использований %d  ", options.uses);
         if (options.ttlMs > 0)
-            std::printf("живёт %s", duration(options.ttlMs).c_str());
+            std::printf("живёт %s  ", duration(options.ttlMs).c_str());
+        if (options.approve)
+            std::printf("пускаю сам  ");
+        if (options.leaveOpen)
+            std::printf("без меня живёт на сидах");
         std::printf("\n");
     }
+    if (options.leaveOpen)
+        std::printf("%sCtrl-C — уйти. Раздача продолжится, пока на связи кто-то, скачавший "
+                    "том целиком;\nусловия после ухода уже не поменять.%s\n",
+                    dim(), reset());
 
     // Раздача живёт, пока жива команда, а ssh-сессия уносит её с собой.
     // Подсказка нужна ровно там — зашли по ssh и ещё не в tmux или screen;
@@ -530,6 +689,21 @@ int runSend(const Options &options, const Relay &relay)
     bool failed = false;
     std::string failure;
 
+    // Очередь у двери (--approve). Спрашиваем по одному: клавиша отвечает
+    // за того, кто стоит первым.
+    std::vector<Knock> knocks;
+    bool keysOn = false;
+    const auto answer = [&](int id, bool yes, bool all) {
+        json::Value a = json::Value::object();
+        a.set("type", json::Value::make("approve"));
+        if (all)
+            a.set("all", json::Value::make(true));
+        else
+            a.set("receiver", json::Value::make(int64_t(id)));
+        a.set("ok", json::Value::make(yes));
+        ws.sendText(a.dump());
+    };
+
     while (!stopRequested() && ws.isOpen()) {
         if (!ws.pump(100)) {
             if (!stopRequested()) {
@@ -566,6 +740,16 @@ int runSend(const Options &options, const Relay &relay)
                     row.role = p["role"].toString();
                     peers.push_back(std::move(row));
                 }
+            } else if (type == "approval_request") {
+                Knock k;
+                k.id = int(v["receiver"].toInt(0));
+                k.name = v["name"].toString();
+                knocks.push_back(std::move(k));
+            } else if (type == "approval_cancel") {
+                const int id = int(v["receiver"].toInt(0));
+                knocks.erase(std::remove_if(knocks.begin(), knocks.end(),
+                                            [id](const Knock &k) { return k.id == id; }),
+                             knocks.end());
             } else if (type == "error") {
                 failed = true;
                 failure = explainError(v["reason"].toString());
@@ -573,6 +757,30 @@ int runSend(const Options &options, const Relay &relay)
         }
         if (failed)
             break;
+
+        // ---- кто у двери ----
+        // Клавиши читаются, только пока есть вопрос: всё остальное время
+        // терминал ведёт себя как обычно.
+        if (!knocks.empty() && !keysOn) {
+            platform::consoleKeys(true);
+            keysOn = true;
+        } else if (knocks.empty() && keysOn) {
+            platform::consoleKeys(false);
+            keysOn = false;
+        }
+        for (int key = platform::consolePollKey(); key >= 0 && !knocks.empty();
+             key = platform::consolePollKey()) {
+            const Answer a = answerFor(key);
+            if (a == Answer::None)
+                continue;
+            if (a == Answer::All) {
+                answer(0, true, true);
+                knocks.clear();
+            } else {
+                answer(knocks.front().id, a == Answer::Yes, false);
+                knocks.erase(knocks.begin());
+            }
+        }
 
         // ---- хеши на лету ----
         // Сегменты уходят пачками: по 256 хешей или раз в 300 мс, чтобы не
@@ -761,6 +969,17 @@ int runSend(const Options &options, const Relay &relay)
                             + duration(hashesTookMs) + reset());
         }
 
+        if (!knocks.empty()) {
+            const Knock &k = knocks.front();
+            const std::string who = k.name.empty() ? ("гость " + std::to_string(k.id)) : k.name;
+            std::string q = std::string(accent()) + "Пустить «" + who + "»?" + reset() + "  "
+                            + dim() + "y — да · n — нет · a — пускать всех дальше" + reset();
+            if (knocks.size() > 1)
+                q += std::string(dim()) + "  (ждут ещё " + std::to_string(knocks.size() - 1) + ")"
+                     + reset();
+            lines.push_back(std::move(q));
+        }
+
         if (peers.empty()) {
             lines.push_back(std::string(dim()) + "получателей пока нет — ссылка ждёт" + reset());
         } else {
@@ -783,7 +1002,18 @@ int runSend(const Options &options, const Relay &relay)
     }
 
     panel.finish();
+    if (keysOn)
+        platform::consoleKeys(false);
     ws.closeGracefully();
+
+    // Ушёл сам, разрешив раздаче жить без него. Жива ли она — решает
+    // сервер: нужен кто-то со всем томом. Последняя сводка это и говорит.
+    bool delegated = false;
+    if (!failed && stopRequested() && options.leaveOpen) {
+        for (const PeerRow &p : peers)
+            if (p.role == "seed")
+                delegated = true;
+    }
 
     // Итог раздачи — двумя числами, и второе важнее первого.
     //
@@ -807,8 +1037,20 @@ int runSend(const Options &options, const Relay &relay)
         std::fprintf(stderr, "\n%sРаздача прервана:%s %s\n", bad(), reset(), failure.c_str());
         return 1;
     }
-    if (stopRequested())
+    if (delegated) {
+        std::printf("\n%sВы ушли, раздача продолжается без вас.%s Её отдают те, кто скачал том\n"
+                    "целиком, пока хоть один из них на связи. Продлить срок, поменять условия\n"
+                    "или закрыть доступ можно из браузера:\n  %s%s%s\n"
+                    "%sЭта ссылка — права владельца. Никому её не пересылайте.%s\n",
+                    bold(), reset(), accent(),
+                    manageLink(link, created.ownerToken, !options.password).c_str(), reset(),
+                    dim(), reset());
+    } else if (stopRequested() && options.leaveOpen) {
+        std::printf("\n%sРаздача остановлена: никто не скачал том целиком, и отдавать его\n"
+                    "без вас некому.%s\n", dim(), reset());
+    } else if (stopRequested()) {
         std::printf("\n%sРаздача остановлена. Ссылка больше не работает.%s\n", dim(), reset());
+    }
     return 0;
 }
 

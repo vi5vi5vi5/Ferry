@@ -45,7 +45,7 @@ const STALL_MS = 120000;
 // повод попробовать ещё раз.
 export const FINAL_ERRORS = new Set([
     'need_key', 'transfer_not_found', 'uses_exhausted', 'expired', 'sender_gone',
-    'no_source', 'chunk_mismatch', 'owner_conflict', 'bad_message', 'approval_denied',
+    'no_source', 'chunk_mismatch', 'owner_conflict', 'bad_message', 'approval_denied', 'revoked',
     'bad_hashes', 'bad_key', 'bad_manifest', 'bad_meta', 'no_space', 'busy', 'io',
 ]);
 
@@ -231,6 +231,7 @@ export class Receiver {
         ws.binaryType = 'arraybuffer';
         this.ws = ws;
         this.accepted = false;
+        this.waitingApproval = false;
         this.ranges = false;
         this.sentHave = -1;
         this.lastAck = 0;
@@ -394,8 +395,28 @@ export class Receiver {
         if (!v || typeof v !== 'object')
             return;
         switch (v.type) {
+        case 'approval_pending':
+            // Ключ принят, решает отправитель. Сколько он будет думать,
+            // неизвестно, поэтому сторож на hello здесь молчит; уйти можно
+            // кнопкой «Остановить», и использование при этом не списано.
+            this.waitingApproval = true;
+            this.lastMessageAt = now();
+            this.setPhase('approval');
+            break;
+        case 'state':
+            // Отправитель ушёл, разрешив раздаче жить без него, — или
+            // вернулся. Приёму это ничего не меняет, человеку стоит знать.
+            if (typeof v.state === 'string')
+                this.relayState = v.state;
+            if (typeof v.uses_left === 'number')
+                this.usesLeft = v.uses_left;
+            this.emitProgress();
+            break;
         case 'hello_ok':
             this.accepted = true;
+            this.waitingApproval = false;
+            if (typeof v.state === 'string')
+                this.relayState = v.state;
             this.reconnectAttempt = 0;
             this.ranges = Array.isArray(v.features) && v.features.includes('ranges');
             this.canSeed = !!v.can_seed;
@@ -580,7 +601,8 @@ export class Receiver {
             // оборачивается данными. Тишина в STALL_MS — это мёртвая сеть,
             // о которой браузер ещё не знает.
             if (this.ws && !this.finished
-                && ((!this.accepted && t - this.socketOpenedAt > HELLO_TIMEOUT_MS)
+                && ((!this.accepted && !this.waitingApproval
+                     && t - this.socketOpenedAt > HELLO_TIMEOUT_MS)
                     || (this.accepted && t - this.lastMessageAt > STALL_MS)))
                 this.abandonSocket();
             if (this.accepted && this.ws && !this.finished && t - this.lastAck > 300)
@@ -893,6 +915,7 @@ export class Receiver {
             hashesComplete: this.hashesComplete,
             reconnectAt: this.phase === 'reconnecting' ? this.reconnectAt : 0,
             reconnectAttempt: this.reconnectAttempt,
+            relayState: this.relayState || '',
             served: this.served,
             servedBytes: this.servedBytes,
             seeding: this.seeding && this.store.canRead && !!this.ws,

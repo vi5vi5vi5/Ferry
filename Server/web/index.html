@@ -6,8 +6,10 @@
 <meta name="color-scheme" content="dark">
 <meta name="referrer" content="no-referrer">
 <!-- Здесь рождается ключ раздачи, поэтому странице нельзя ничего чужого:
-     ни скриптов, ни запросов в сторону. Стили в атрибутах — из макетов. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; worker-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+     ни скриптов, ни запросов в сторону. Стили в атрибутах — из макетов.
+     wasm-unsafe-eval — только для Argon2id в режиме пароля: он разрешает
+     собрать WebAssembly из своего же скрипта, но не eval. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <title>Ferry — паром для файлов</title>
 <link rel="icon" href="data:,">
 <!-- Две страницы в одной. Главная — макет «Ferry · Main» (Claude Design);
@@ -238,6 +240,13 @@
       </div>
 
       <div class="load-body" data-card="drop">
+        <div class="banner own-left" id="own-left" hidden>
+          <p><span data-t="ownLeftTitle">Ваша раздача идёт без вас.</span><small>Её отдают те, кто скачал том целиком. Продлить, добавить использований или закрыть — по ссылке владельца.</small></p>
+          <div class="btns">
+            <a class="btn btn-sm" id="own-left-go" href="/">Управлять</a>
+            <button type="button" class="btn btn-sm" id="own-left-forget">Забыть</button>
+          </div>
+        </div>
         <div class="fx-ants drop" id="drop" style="display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 30px 24px 28px; text-align: center; background-color: var(--surface-200); border-radius: 4px">
           <svg viewBox="0 0 160 96" width="160" height="96" aria-hidden="true" style="display: block">
             <path d="M0 4 H160" stroke="#5a7181" stroke-width="2"></path>
@@ -316,11 +325,41 @@
           </div>
           <span class="caption" data-t="polHint">Использование тратит тот, кто доказал владение ключом. Превью-бот мессенджера его не сжигает.</span>
         </div>
+        <!-- Ручки M4 показываются, только если релей их умеет (/api/health → features). -->
+        <div class="pol acc" id="acc" hidden>
+          <span class="label">доступ</span>
+          <div class="switch-row">
+            <button type="button" role="switch" class="switch" id="sw-approve" aria-checked="false" aria-labelledby="sw-approve-t"><i></i></button>
+            <span class="switch-t">
+              <b id="sw-approve-t">Спрашивать меня, кого пускать</b>
+              <span>Получатель с верным ключом ждёт у двери, пока вы не нажмёте «Пустить». Использование списывается, только когда пустите.</span>
+            </span>
+          </div>
+          <div class="switch-row">
+            <button type="button" role="switch" class="switch" id="sw-leave" aria-checked="false" aria-labelledby="sw-leave-t"><i></i></button>
+            <span class="switch-t">
+              <b id="sw-leave-t">Оставить раздачу работать без меня</b>
+              <span data-t="leaveText">Закроете вкладку — раздачу продолжат те, кто уже скачал том целиком, пока хоть один из них на связи. Если таких нет, ссылка погаснет. Вернуться к управлению можно по ссылке владельца.</span>
+            </span>
+          </div>
+          <div class="switch-row" id="pw-row" hidden>
+            <button type="button" role="switch" class="switch" id="sw-pw" aria-checked="false" aria-labelledby="sw-pw-t"><i></i></button>
+            <span class="switch-t">
+              <b id="sw-pw-t">Пароль вместо ключа</b>
+              <span>Ссылка уйдёт без ключа, а ключ получатель выведет из фразы, которую вы скажете ему отдельно — голосом или другим мессенджером.</span>
+            </span>
+          </div>
+          <div class="pw-new" id="pw-box" hidden>
+            <input id="pw-new" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Пароль для раздачи" placeholder="пять слов или больше через пробел">
+            <span class="caption" id="pw-hint" data-t="pwHint">Регистр, лишние пробелы и «ё» не важны. Пять слов, которые не встречаются вместе, — надёжнее, чем одно сложное.</span>
+            <span class="caption caption--warn">Этот режим слабее ключа: у кого ссылка, тот может перебирать пароли сколько угодно, не спрашивая релей.</span>
+          </div>
+        </div>
         <div class="btns">
           <button type="button" class="btn btn-p" id="send-go">Отправить</button>
           <button type="button" class="btn" id="cargo-reset">Выбрать другое</button>
         </div>
-        <span class="caption">Раздача идёт, пока открыта эта вкладка: файлы читаются прямо с вашего диска.</span>
+        <span class="caption" data-t="sendFoot">Раздача идёт, пока открыта эта вкладка: файлы читаются прямо с вашего диска.</span>
       </div>
     </div>
   </div>
@@ -676,8 +715,8 @@
         </div>
       </div>
       <div class="sx-lab" style="position: absolute; left: 1.2%; top: 57%; display: flex; flex-direction: column; gap: 2px">
-        <span style="font: var(--text-body-strong); color: var(--ink-100)">ваш порт</span>
-        <span style="font: var(--text-mono-s); color: var(--signal-text)"><span data-t="sxRate">0</span> МБ/с</span>
+        <span style="font: var(--text-body-strong); color: var(--ink-100)" data-t="sxPort">ваш порт</span>
+        <span style="font: var(--text-mono-s); color: var(--signal-text)" class="sx-port-rate"><span data-t="sxRate">0</span> МБ/с</span>
       </div>
       <div class="sx-lab" style="position: absolute; left: 50%; top: 56%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 2px; text-align: center">
         <span style="font: var(--text-mono-m); color: var(--ink-100)" data-t="host"></span>
@@ -711,12 +750,24 @@
     <div class="btns">
       <button type="button" class="btn btn-p" id="sx-again">Тот же груз заново</button>
       <button type="button" class="btn" id="sx-new">Отправить другое</button>
+      <button type="button" class="btn" id="sx-manage" hidden>Управлять без отправителя</button>
     </div>
   </div>
 
+  <section class="sx-knocks" id="sx-knocks" aria-live="polite" hidden>
+    <div class="sx-knocks-h">
+      <span class="eyebrow">у двери</span>
+      <b data-t="sxKnockTitle">Ждут вашего решения</b>
+      <span class="grow"></span>
+      <button type="button" class="btn btn-sm" id="sx-allow-all">Пускать всех без вопросов</button>
+    </div>
+    <div id="sx-knock-list"></div>
+    <span class="caption">Ключ у них верный — иначе релей не довёл бы их до двери. Пока вы не ответили, использование не списано.</span>
+  </section>
+
   <div class="sx-two">
     <section class="sec sec--tight" style="gap: 14px">
-      <div class="sec-h"><span class="n">02</span><h2>ссылка и ключ</h2><span class="rule"></span></div>
+      <div class="sec-h"><span class="n">02</span><h2 data-t="sxLinkHead">ссылка и ключ</h2><span class="rule"></span></div>
       <div id="sx-prep" class="sx-prep">
         <span class="fx-ring fx-spin" style="width: 18px; height: 18px"></span>
         <div style="display: flex; flex-direction: column; gap: 4px; min-width: 0">
@@ -727,7 +778,11 @@
       <div class="sx-link-row" id="sx-linkbox" hidden>
         <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px">
           <p class="sx-link"><span data-t="sxLink"></span><span class="k" data-t="sxKey"></span></p>
-          <p class="caption caption--2">Часть после решётки — ключ. На сервер она не уходит: её нет ни в запросе, ни в логах, ни в Referer. Кто получил ссылку целиком — получил том.</p>
+          <p class="caption caption--2" data-t="sxLinkNote">Часть после решётки — ключ. На сервер она не уходит: её нет ни в запросе, ни в логах, ни в Referer. Кто получил ссылку целиком — получил том.</p>
+          <div class="sx-split" id="sx-pw" hidden>
+            <p class="caption caption--2">Пароль передайте отдельно — голосом или другим мессенджером. Без него ссылка бесполезна, а с ним получатель откроет том.</p>
+            <div class="sx-keyrow"><code data-t="sxPwText">••••••••••••</code><button type="button" class="btn btn-sm" id="sx-pw-show" aria-pressed="false">Показать пароль</button></div>
+          </div>
           <div class="btns">
             <button type="button" class="btn btn-p" id="sx-copy"><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="1"></rect><path d="M13 7 V4 a1 1 0 0 0 -1 -1 H4 a1 1 0 0 0 -1 1 V12 a1 1 0 0 0 1 1 H7"></path></svg><span data-label>Копировать</span></button>
             <button type="button" class="btn" id="sx-copy-bare">Ссылка без ключа</button>
@@ -735,6 +790,11 @@
           <div class="sx-split" id="sx-split" hidden>
             <p class="caption caption--2">Ссылка без ключа скопирована. Ключ отправьте другим путём — получатель вставит его на странице, которую откроет ссылка.</p>
             <div class="sx-keyrow"><code data-t="sxKeyOnly"></code><button type="button" class="btn btn-sm" id="sx-copy-key">Копировать ключ</button></div>
+          </div>
+          <div class="sx-split sx-owner" id="sx-owner" hidden>
+            <span class="eyebrow">ссылка владельца</span>
+            <p class="caption caption--2" data-t="sxOwnerText">Закроете вкладку — раздача продолжится, если кто-то уже скачал том целиком. Вернуться к управлению — продлить, добавить использований, закрыть — можно по этой ссылке. Это права владельца: никому её не пересылайте.</p>
+            <div class="btns"><button type="button" class="btn btn-sm" id="sx-copy-owner">Копировать ссылку владельца</button></div>
           </div>
         </div>
         <div class="sx-qr" role="img" aria-label="QR-код ссылки целиком">
@@ -745,7 +805,7 @@
       </div>
     </section>
 
-    <section class="sec sec--tight" style="gap: 14px">
+    <section class="sec sec--tight sx-flowsec" style="gap: 14px">
       <div class="sec-h"><span class="n">03</span><h2>поток</h2><span class="rule"></span></div>
       <div style="display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap">
         <span class="sx-rate" data-t="sxRate">0</span>
@@ -769,7 +829,7 @@
     <p class="caption sx-empty" id="sx-none" data-t="sxNone">Пока никого. Пришлите ссылку — получатель откроет её в браузере или заберёт командой ferry get.</p>
   </section>
 
-  <section class="sec sec--tight" style="gap: 12px">
+  <section class="sec sec--tight sx-holdsec" style="gap: 12px">
     <div class="sec-h"><span class="n">05</span><h2>трюм · карта тома</h2><span class="rule"></span><span class="aside" data-t="sxMapAside"></span></div>
     <div class="vmap-wrap sx-map-wrap">
       <div id="sx-cursors"></div>
@@ -788,8 +848,20 @@
       <span class="eyebrow">условия выдачи</span>
       <span class="sx-cond" id="sx-cond">—</span>
       <span class="caption" data-t="sxFootNote">Раздача идёт, пока открыта эта вкладка.</span>
+      <div class="sx-pol" id="sx-pol" hidden>
+        <div class="switch-row">
+          <button type="button" role="switch" class="switch" id="sx-sw-approve" aria-checked="false" aria-labelledby="sx-sw-approve-t"><i></i></button>
+          <span class="switch-t"><b id="sx-sw-approve-t">Спрашивать меня, кого пускать</b></span>
+        </div>
+        <div class="switch-row" id="sx-leave-row">
+          <button type="button" role="switch" class="switch" id="sx-sw-leave" aria-checked="false" aria-labelledby="sx-sw-leave-t"><i></i></button>
+          <span class="switch-t"><b id="sx-sw-leave-t">Оставить раздачу работать без меня</b></span>
+        </div>
+      </div>
     </div>
     <div class="btns" id="sx-ctl">
+      <button type="button" class="btn" id="sx-extend" hidden>Продлить на сутки</button>
+      <button type="button" class="btn" id="sx-more" hidden>Ещё 5 использований</button>
       <button type="button" class="btn btn-d" id="sx-close">Закрыть доступ</button>
     </div>
     <div class="btns sx-confirm" id="sx-confirm" hidden>

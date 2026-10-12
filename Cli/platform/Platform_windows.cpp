@@ -18,6 +18,7 @@
 
 #include <windows.h>
 
+#include <conio.h>
 #include <io.h>
 #include <shellapi.h>
 #include <wincrypt.h>
@@ -789,6 +790,65 @@ bool copyToClipboard(const std::string &text)
     if (!ok)
         ::GlobalFree(mem);
     return ok;
+}
+
+bool consoleReadSecret(const std::string &prompt, std::string &out)
+{
+    std::fputs(prompt.c_str(), stderr);
+    std::fflush(stderr);
+    out.clear();
+
+    HANDLE in = ::GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    if (in == INVALID_HANDLE_VALUE || !::GetConsoleMode(in, &mode)) {
+        // Не консоль — перенаправленный ввод. Прятать нечего.
+        char buf[1024];
+        if (!std::fgets(buf, sizeof(buf), stdin))
+            return false;
+        out = buf;
+        while (!out.empty() && (out.back() == '\n' || out.back() == '\r'))
+            out.pop_back();
+        return true;
+    }
+
+    ::SetConsoleMode(in, (mode & ~DWORD(ENABLE_ECHO_INPUT)) | ENABLE_LINE_INPUT);
+    std::wstring line;
+    wchar_t buf[256];
+    DWORD got = 0;
+    bool ok = false;
+    // ReadConsoleW, а не fgets: только так кириллица доходит до нас
+    // настоящей, а не в кодовой странице консоли.
+    while (::ReadConsoleW(in, buf, DWORD(std::size(buf)), &got, nullptr) && got > 0) {
+        ok = true;
+        line.append(buf, got);
+        if (line.back() == L'\n')
+            break;
+    }
+    ::SetConsoleMode(in, mode);
+    std::fputc('\n', stderr);
+
+    while (!line.empty() && (line.back() == L'\n' || line.back() == L'\r'))
+        line.pop_back();
+    out = toUtf8(line);
+    return ok;
+}
+
+void consoleKeys(bool)
+{
+    // _kbhit и _getwch работают с консолью и так, переключать нечего.
+}
+
+int consolePollKey()
+{
+    if (!::_kbhit())
+        return -1;
+    const wint_t c = ::_getwch();
+    // Стрелки и функциональные клавиши приходят парой: префикс и код.
+    if (c == 0 || c == 0xE0) {
+        ::_getwch();
+        return -1;
+    }
+    return int(c);
 }
 
 int consoleWidth()

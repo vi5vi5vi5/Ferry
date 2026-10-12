@@ -95,6 +95,21 @@ quint32 parseFeatures(const QJsonValue &value)
 
 } // namespace
 
+QString TransferSession::stateName(State state)
+{
+    switch (state) {
+    case State::Draft:
+        return QStringLiteral("draft");
+    case State::Active:
+        return QStringLiteral("active");
+    case State::Delegated:
+        return QStringLiteral("delegated");
+    case State::Closed:
+        break;
+    }
+    return QStringLiteral("closed");
+}
+
 TransferSession::TransferSession(const QByteArray &id, const QByteArray &ownerToken, QObject *parent)
     : QObject(parent), m_id(id), m_ownerToken(ownerToken)
 {
@@ -189,7 +204,20 @@ bool TransferSession::applyOffer(const QJsonObject &msg, QString *errorCode)
     m_totalBytes = quint64(total);
     m_chunkSize = quint32(chunkSize);
     m_chunkCount = plan.chunkCount;
+    // Пароль вместо ключа (§4): ключ выводится из пароля, соль лежит
+    // здесь и отдаётся всем по GET. Сервер пароля не видит, как не видел
+    // ключа, — он только хранит соль, без которой ключ не вывести.
     m_mode = msg.value(QStringLiteral("mode")).toString(QStringLiteral("key"));
+    m_passwordSalt.clear();
+    if (m_mode == QLatin1String("password")) {
+        m_passwordSalt = QByteArray::fromBase64(
+            msg.value(QStringLiteral("salt")).toString().toLatin1(),
+            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+        if (m_passwordSalt.size() != int(ferry::kPasswordSaltSize))
+            return fail(ferry::err::kBadMessage);
+    } else if (m_mode != QLatin1String("key")) {
+        return fail(ferry::err::kBadMessage);
+    }
 
     // ---- политика (§5) ----
     const QJsonObject policy = msg.value(QStringLiteral("policy")).toObject();
@@ -201,6 +229,18 @@ bool TransferSession::applyOffer(const QJsonObject &msg, QString *errorCode)
     m_expiresAtMs = QDateTime::currentMSecsSinceEpoch() + ttl;
 
     m_maxConcurrent = std::clamp(policy.value(QStringLiteral("max_concurrent")).toInt(8), 1, 64);
+
+    // Подтверждение и уход владельца (§5). Без подтверждения снимать
+    // при уходе нечего, и on_owner_leave ни на что не влияет; с ним по
+    // умолчанию раздача закрывается — «сид подтвердил за отправителя»
+    // в системе не бывает.
+    m_requireApproval = policy.value(QStringLiteral("require_approval")).toBool(false);
+    m_leaveOpen = policy.value(QStringLiteral("leave_open")).toBool(false);
+    const QString onLeave = policy.value(QStringLiteral("on_owner_leave")).toString();
+    if (!onLeave.isEmpty() && onLeave != QLatin1String("close")
+        && onLeave != QLatin1String("freeze"))
+        return fail(ferry::err::kBadMessage);
+    m_freezeOnLeave = onLeave == QLatin1String("freeze");
 
     // Окно меряется ФРЕЙМАМИ, а не открытыми чанками: хранится в нём
     // ровно то, что приехало от отправителя и уедет получателям —
@@ -242,37 +282,76 @@ QJsonObject TransferSession::metaJson(qint64 nowMs, bool streamClient) const
     o[QStringLiteral("nonce_prefix")] = QString::fromLatin1(m_noncePrefix.toBase64(
         QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
     o[QStringLiteral("mode")] = m_mode;
-    o[QStringLiteral("state")] = m_sender ? QStringLiteral("active") : QStringLiteral("closed");
+    if (!m_passwordSalt.isEmpty())
+        o[QStringLiteral("salt")] = QString::fromLatin1(m_passwordSalt.toBase64(
+            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+    o[QStringLiteral("state")] = stateName(m_state);
     o[QStringLiteral("receivers")] = m_receivers.size();
     o[QStringLiteral("uses_left")] = m_usesLeft;
     o[QStringLiteral("expires_in_ms")] = double(std::max<qint64>(0, m_expiresAtMs - nowMs));
-    o[QStringLiteral("require_approval")] = false;   // M4
+    o[QStringLiteral("require_approval")] = m_requireApproval;
     return o;
+}
+
+QJsonObject TransferSession::stateJson(qint64 nowMs) const
+{
+    QJsonObject o;
+    o[QStringLiteral("type")] = QStringLiteral("state");
+    o[QStringLiteral("state")] = stateName(m_state);
+    o[QStringLiteral("uses_left")] = m_usesLeft;
+    o[QStringLiteral("expires_in_ms")] = double(std::max<qint64>(0, m_expiresAtMs - nowMs));
+    o[QStringLiteral("require_approval")] = m_requireApproval;
+    o[QStringLiteral("leave_open")] = m_leaveOpen;
+    o[QStringLiteral("on_owner_leave")] =
+        m_freezeOnLeave ? QStringLiteral("freeze") : QStringLiteral("close");
+    o[QStringLiteral("max_concurrent")] = m_maxConcurrent;
+    o[QStringLiteral("receivers")] = m_receivers.size();
+    return o;
+}
+
+QJsonArray TransferSession::serverFeatures()
+{
+    QJsonArray f;
+    f.append(QStringLiteral("ranges"));
+    f.append(QStringLiteral("backfill"));
+    // Хеши на лету: отправитель может начать раздачу, не посчитав том
+    // целиком, а получатель — принимать список сегментами.
+    f.append(QString::fromLatin1(ferry::kFeatureStreamHashes));
+    // M4: подтверждение, смена условий, отзыв, уход владельца с
+    // делегированием и возврат по owner_token.
+    f.append(QString::fromLatin1(ferry::kFeaturePolicy));
+    // Пароль вместо ключа: соль в метаданных, ключ из Argon2id.
+    f.append(QString::fromLatin1(ferry::kFeaturePassword));
+    return f;
 }
 
 void TransferSession::attachSender(ClientSession *sender)
 {
     m_sender = sender;
+    m_owner = sender;
     sender->setRole(ClientSession::Role::Sender);
     sender->setTransfer(this);
 }
 
-bool TransferSession::attachReceiver(ClientSession *receiver, const QJsonObject &hello,
-                                     qint64 nowMs, QString *errorCode)
+TransferSession::Admission TransferSession::attachReceiver(ClientSession *receiver,
+                                                          const QJsonObject &hello,
+                                                          qint64 nowMs, QString *errorCode)
 {
     const auto fail = [&](const char *code) {
         if (errorCode)
             *errorCode = QString::fromLatin1(code);
-        return false;
+        return Admission::Rejected;
     };
 
-    if (m_state != State::Active || !m_hasOffer)
+    if (!m_hasOffer || (m_state != State::Active && m_state != State::Delegated))
         return fail(ferry::err::kSenderGone);
     if (nowMs >= m_expiresAtMs)
         return fail(ferry::err::kExpired);
     if (m_usesLeft == 0)
         return fail(ferry::err::kUsesExhausted);
-    if (m_receivers.size() >= m_maxConcurrent)
+    // Ждущие решения считаются вместе с теми, кто качает: иначе потолок
+    // обходился бы очередью у двери.
+    if (m_receivers.size() + m_pending.size() >= m_maxConcurrent)
         return fail(ferry::err::kTooManyReceivers);
 
     // ---- что клиент умеет и что у него уже есть ----
@@ -312,10 +391,62 @@ bool TransferSession::attachReceiver(ClientSession *receiver, const QJsonObject 
             receiver->have().setRange({0, uint64_t(upto) - 1});
     }
 
+    receiver->setTransfer(this);
+    receiver->setReceiverId(m_nextReceiverId++);
+
+    // Раздача спрашивает владельца — и владелец на связи. Получатель
+    // встаёт в очередь: ключ он доказал, но использование не списано,
+    // пока ему не сказали «да». Без владельца подтверждать некому, и
+    // такого состояния не бывает: при уходе подтверждение либо снято,
+    // либо раздача закрыта (onSenderLeft).
+    if (m_requireApproval && m_owner) {
+        if (m_pending.size() >= kMaxPending) {
+            receiver->setTransfer(nullptr);
+            return fail(ferry::err::kTooManyReceivers);
+        }
+        receiver->setRole(ClientSession::Role::Pending);
+        m_pending.append(receiver);
+
+        QJsonObject wait;
+        wait[QStringLiteral("type")] = QStringLiteral("approval_pending");
+        receiver->sendJson(wait);
+
+        QJsonObject ask;
+        ask[QStringLiteral("type")] = QStringLiteral("approval_request");
+        ask[QStringLiteral("receiver")] = int(receiver->receiverId());
+        ask[QStringLiteral("name")] = receiver->name();
+        m_owner->sendJson(ask);
+        return Admission::Pending;
+    }
+
+    return admit(receiver, errorCode) ? Admission::Admitted : Admission::Rejected;
+}
+
+bool TransferSession::admit(ClientSession *receiver, QString *errorCode)
+{
+    const auto fail = [&](const char *code) {
+        if (errorCode)
+            *errorCode = QString::fromLatin1(code);
+        receiver->setRole(ClientSession::Role::Unknown);
+        receiver->setTransfer(nullptr);
+        return false;
+    };
+
+    // Проверки политики ещё раз: между hello и решением владельца могло
+    // пройти сколько угодно времени, и последнее использование успел
+    // забрать кто-то другой.
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (nowMs >= m_expiresAtMs)
+        return fail(ferry::err::kExpired);
+    if (m_usesLeft == 0)
+        return fail(ferry::err::kUsesExhausted);
+    if (m_receivers.size() >= m_maxConcurrent)
+        return fail(ferry::err::kTooManyReceivers);
+
     // Курсор живого потока ставится на конец непрерывного НАЧАЛА, а не на
     // количество принятого: чанк, лежащий за дыркой, живому потоку не
     // помогает — он поедет второй волной.
-    quint64 haveUpto = std::min<quint64>(receiver->have().prefix(), m_chunkCount);
+    const quint64 haveUpto = std::min<quint64>(receiver->have().prefix(), m_chunkCount);
 
     // Опоздавший больше НЕ получает отказ.
     //
@@ -325,21 +456,25 @@ bool TransferSession::attachReceiver(ClientSession *receiver, const QJsonObject 
     // летит всем, серверу это не стоит ни одного обращения к источнику, —
     // а пропущенное начало тянется второй волной (§6).
     //
-    // Курсор живой волны ставится туда, где для этого получателя
-    // начинается бесплатное: либо сразу за его непрерывным началом,
-    // либо с начала окна, если он опоздал сильнее.
-    receiver->setRole(ClientSession::Role::Receiver);
-    receiver->setTransfer(this);
-    receiver->setReceiverId(m_nextReceiverId++);
-    //
     // И одна оговорка, без которой всё это стало бы хуже честного
     // отказа. Вторая волна держится на том, что получатель говорит,
     // что у него есть. Клиент M1 этого не умеет — значит достать ему
     // пропущенное неоткуда, и пустить его дальше значило бы отдать том
     // с дырой молча. Отказ здесь остаётся — но только для него.
-    if (!receiver->speaks(ClientSession::FeatureRanges) && m_window.firstIndex() > haveUpto)
-        return fail(ferry::err::kNoSource);
+    if (!receiver->speaks(ClientSession::FeatureRanges)) {
+        if (m_window.firstIndex() > haveUpto)
+            return fail(ferry::err::kNoSource);
+        // Без отправителя живой волны нет, а ничего, кроме неё, клиент M1
+        // не понимает: он простоял бы на краю окна до конца срока.
+        if (!m_sender)
+            return fail(ferry::err::kSenderGone);
+    }
 
+    // Курсор живой волны ставится туда, где для этого получателя
+    // начинается бесплатное: либо сразу за его непрерывным началом,
+    // либо с начала окна, если он опоздал сильнее.
+    receiver->setRole(ClientSession::Role::Receiver);
+    receiver->setTransfer(this);
     receiver->setCursor(std::max<quint64>(haveUpto, m_window.firstIndex()));
     receiver->setAcked(haveUpto);
     receiver->setWindowHint(0);
@@ -347,31 +482,87 @@ bool TransferSession::attachReceiver(ClientSession *receiver, const QJsonObject 
     m_receivers.append(receiver);
 
     // Использование списывается ЗДЕСЬ — то есть после того, как получатель
-    // доказал владение ключом (§5). Бот, дёрнувший ссылку без фрагмента,
-    // до этой строки не доходит и ничего не сжигает.
+    // доказал владение ключом (§5) и, если раздача спрашивает, владелец
+    // сказал «да». Бот, дёрнувший ссылку без фрагмента, до этой строки не
+    // доходит и ничего не сжигает.
     if (m_usesLeft > 0)
         --m_usesLeft;
 
+    QJsonObject ok;
+    ok[QStringLiteral("type")] = QStringLiteral("hello_ok");
+    ok[QStringLiteral("receiver_id")] = int(receiver->receiverId());
+    ok[QStringLiteral("state")] = stateName(m_state);
+    // Честный ответ на вопрос «будут ли меня просить отдавать»: да, если
+    // клиент сам объявил, что умеет.
+    ok[QStringLiteral("can_seed")] = canSeed(receiver);
+    ok[QStringLiteral("chunks")] = double(m_chunkCount);
+    ok[QStringLiteral("uses_left")] = m_usesLeft;
+    ok[QStringLiteral("from_chunk")] = double(receiver->cursor());
+    ok[QStringLiteral("features")] = serverFeatures();
+    receiver->sendJson(ok);
+
+    // Сегменты хешей — сразу за hello_ok и раньше первого фрейма (он
+    // уйдёт только из pump ниже). Порядок в сокете и есть порядок
+    // прихода, так что хеш каждого чанка окажется у получателя раньше
+    // самого чанка.
+    sendHashesSoFar(receiver);
+
+    if (m_owner)
+        m_owner->sendJson(peersJson());
+    m_noSeedSinceMs = hasSeed() ? 0 : m_noSeedSinceMs;
+    pump();
     return true;
+}
+
+void TransferSession::rejectPending(ClientSession *receiver, const char *reason)
+{
+    m_pending.removeAll(receiver);
+    QJsonObject err;
+    err[QStringLiteral("type")] = QStringLiteral("error");
+    err[QStringLiteral("reason")] = QString::fromLatin1(reason);
+    receiver->sendJson(err);
+    receiver->setRole(ClientSession::Role::Unknown);
+    receiver->setTransfer(nullptr);
+    receiver->close();
 }
 
 void TransferSession::detach(ClientSession *session)
 {
+    // Ждал решения и не дождался. Владельцу — снять вопрос с экрана.
+    if (m_pending.contains(session)) {
+        m_pending.removeAll(session);
+        session->setTransfer(nullptr);
+        if (m_owner) {
+            QJsonObject gone;
+            gone[QStringLiteral("type")] = QStringLiteral("approval_cancel");
+            gone[QStringLiteral("receiver")] = int(session->receiverId());
+            m_owner->sendJson(gone);
+        }
+        return;
+    }
+
+    // Владелец, вернувшийся без тома, ушёл снова. Раздача от этого не
+    // меняется: отдавали и без него.
+    if (session == m_owner && session != m_sender) {
+        m_owner = nullptr;
+        session->setTransfer(nullptr);
+        // Вернувшись, он мог снова включить подтверждение. Теперь
+        // спрашивать некого — то же правило, что при первом уходе:
+        // пускают всех с ключом, ждавшие у двери входят.
+        if (m_requireApproval) {
+            m_requireApproval = false;
+            admitAllPending();
+            broadcastToReceivers(stateJson(QDateTime::currentMSecsSinceEpoch()));
+        }
+        return;
+    }
+
     if (session == m_sender) {
         m_sender = nullptr;
-        // M1: отправитель ушёл — раздача кончилась. Делегирование сиду
-        // (§5, состояние DELEGATED) приходит в M4 вместе с политикой.
-        // Тем, кто уже выкачал всё, говорить нечего — они и так закончили.
-        for (ClientSession *r : std::as_const(m_receivers)) {
-            if (r->cursor() < m_chunkCount) {
-                QJsonObject err;
-                err[QStringLiteral("type")] = QStringLiteral("error");
-                err[QStringLiteral("reason")] = QString::fromLatin1(ferry::err::kSenderGone);
-                r->sendJson(err);
-            }
-        }
+        if (m_owner == session)
+            m_owner = nullptr;
         session->setTransfer(nullptr);
-        emit needsClosing(this);
+        onSenderLeft();
         return;
     }
 
@@ -395,6 +586,288 @@ void TransferSession::detach(ClientSession *session)
 
     // Ушёл самый медленный — остальным можно ехать дальше.
     pump();
+    checkDelegated(QDateTime::currentMSecsSinceEpoch());
+}
+
+void TransferSession::onSenderLeft()
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    // Делегировать можно, только если (§5):
+    //  — отправитель сам это разрешил;
+    //  — список хешей досчитан: без него новому получателю нечем
+    //    проверять чанки, а досчитать его некому;
+    //  — есть сид, то есть кто-то со всем томом: окно — буфер джиттера,
+    //    а не хранилище, и держать в нём файл за ушедшего мы не обещали;
+    //  — подтверждение либо выключено, либо снимается при уходе.
+    const bool delegate = m_leaveOpen && m_hashesComplete && hasSeed()
+                          && (!m_requireApproval || m_freezeOnLeave);
+    if (!delegate) {
+        // Отправитель ушёл — раздача кончилась. Тем, кто уже выкачал
+        // всё, говорить нечего — они и так закончили.
+        for (ClientSession *r : std::as_const(m_receivers)) {
+            if (!complete(r)) {
+                QJsonObject err;
+                err[QStringLiteral("type")] = QStringLiteral("error");
+                err[QStringLiteral("reason")] = QString::fromLatin1(ferry::err::kSenderGone);
+                r->sendJson(err);
+            }
+        }
+        emit needsClosing(this);
+        return;
+    }
+
+    m_state = State::Delegated;
+    m_noSeedSinceMs = 0;
+
+    // Просьбы к отправителю больше не исполнятся. Живую волну запомним
+    // ровно по краю окна: если владелец вернётся с томом, она продолжится
+    // оттуда, а не с того, что просили и не получили.
+    for (auto it = m_askedOf.begin(); it != m_askedOf.end();) {
+        if (it.value() == nullptr) {
+            m_backfillInFlight.clear(it.key());
+            it = m_askedOf.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    m_requestedUpTo = qint64(m_window.endIndex()) - 1;
+    for (ClientSession *r : std::as_const(m_receivers))
+        r->setBackfillHint(0);
+
+    // Подтверждение снимается: дальше пускают всех, кто знает ключ, в
+    // пределах оставшихся использований. Те, кто ждал у двери, входят.
+    if (m_requireApproval) {
+        m_requireApproval = false;
+        admitAllPending();
+    }
+
+    qInfo().noquote() << QStringLiteral("отправитель ушёл, раздача живёт на сидах");
+    broadcastToReceivers(stateJson(now));
+    pump();
+    checkDelegated(now);
+}
+
+bool TransferSession::complete(const ClientSession *receiver) const
+{
+    const quint64 done = receiver->speaks(ClientSession::FeatureRanges)
+                             ? receiver->have().cardinality()
+                             : receiver->acked();
+    return done >= m_chunkCount;
+}
+
+bool TransferSession::hasSeed() const
+{
+    for (const ClientSession *r : m_receivers) {
+        if (canSeed(r) && r->backfillStrikes() < kMaxStrikes && complete(r))
+            return true;
+    }
+    return false;
+}
+
+void TransferSession::checkDelegated(qint64 nowMs)
+{
+    if (m_state != State::Delegated)
+        return;
+
+    // Ни одного сида — отдать недостающее некому. Не закрываем сразу:
+    // веб-получатель после обрыва возвращается сам, и секундная заминка
+    // у одного не должна стоить раздачи всем.
+    if (!hasSeed()) {
+        if (m_noSeedSinceMs == 0) {
+            m_noSeedSinceMs = nowMs;
+        } else if (nowMs - m_noSeedSinceMs >= kSeedGraceMs) {
+            qInfo().noquote() << QStringLiteral("раздача без отправителя закрыта: не осталось сидов");
+            closeWith(QString::fromLatin1(ferry::err::kSenderGone));
+            emit needsClosing(this);
+            return;
+        }
+    } else {
+        m_noSeedSinceMs = 0;
+    }
+
+    bool allDone = true;
+    for (const ClientSession *r : std::as_const(m_receivers)) {
+        if (!complete(r)) {
+            allDone = false;
+            break;
+        }
+    }
+
+    // Использования кончились, и всем, кто внутри, уже хватает. Новых не
+    // пустят, старым ничего не нужно — ссылка гаснет.
+    if (allDone && m_usesLeft == 0) {
+        qInfo().noquote() << QStringLiteral("раздача без отправителя закрыта: использования кончились");
+        closeWith(QString::fromLatin1(ferry::err::kUsesExhausted));
+        emit needsClosing(this);
+        return;
+    }
+
+    // Окно без отправителя больше не пополняется, и если сейчас оно никому
+    // не нужно — отпускаем память. Следующему придущему всё отдадут сиды.
+    if (allDone && m_window.count() > 0)
+        m_window.dropBefore(m_window.endIndex());
+}
+
+bool TransferSession::resumeOwner(ClientSession *session, bool serve, QString *errorCode)
+{
+    const auto fail = [&](const char *code) {
+        if (errorCode)
+            *errorCode = QString::fromLatin1(code);
+        return false;
+    };
+    if (!m_hasOffer || (m_state != State::Active && m_state != State::Delegated))
+        return fail(ferry::err::kNotFound);
+    // Отправитель на связи — он и владелец, второго не бывает.
+    if (m_sender)
+        return fail(ferry::err::kOwnerConflict);
+
+    if (m_owner) {
+        QJsonObject err;
+        err[QStringLiteral("type")] = QStringLiteral("error");
+        err[QStringLiteral("reason")] = QString::fromLatin1(ferry::err::kOwnerConflict);
+        m_owner->sendJson(err);
+        m_owner->setTransfer(nullptr);
+        m_owner->setRole(ClientSession::Role::Unknown);
+        m_owner->close();
+    }
+
+    m_owner = session;
+    session->setTransfer(this);
+    if (serve) {
+        m_sender = session;
+        session->setRole(ClientSession::Role::Sender);
+        m_state = State::Active;
+        m_noSeedSinceMs = 0;
+        m_lastGrowthMs = QDateTime::currentMSecsSinceEpoch();
+        broadcastToReceivers(stateJson(m_lastGrowthMs));
+    } else {
+        session->setRole(ClientSession::Role::Owner);
+    }
+    return true;
+}
+
+void TransferSession::admitAllPending()
+{
+    const QList<ClientSession *> waiting = m_pending;
+    m_pending.clear();
+    for (ClientSession *r : waiting) {
+        QString code;
+        if (!admit(r, &code)) {
+            QJsonObject err;
+            err[QStringLiteral("type")] = QStringLiteral("error");
+            err[QStringLiteral("reason")] = code;
+            r->sendJson(err);
+            r->close();
+        }
+    }
+}
+
+bool TransferSession::onApprove(const QJsonObject &msg)
+{
+    const bool ok = msg.value(QStringLiteral("ok")).toBool(false);
+    const bool all = msg.value(QStringLiteral("all")).toBool(false);
+    const QJsonValue idValue = msg.value(QStringLiteral("receiver"));
+    if (!all && !idValue.isDouble())
+        return false;
+
+    // «Пускать всех дальше»: подтверждение выключается, и очередь
+    // входит целиком.
+    if (all && ok) {
+        m_requireApproval = false;
+        admitAllPending();
+        if (m_owner)
+            m_owner->sendJson(stateJson(QDateTime::currentMSecsSinceEpoch()));
+        return true;
+    }
+
+    // Ответ мог разминуться с уходом того, о ком он: это не ошибка.
+    ClientSession *target = nullptr;
+    for (ClientSession *r : std::as_const(m_pending)) {
+        if (int(r->receiverId()) == idValue.toInt(-1)) {
+            target = r;
+            break;
+        }
+    }
+    if (!target)
+        return true;
+
+    if (!ok) {
+        rejectPending(target, ferry::err::kApprovalDenied);
+        return true;
+    }
+    m_pending.removeAll(target);
+    QString code;
+    if (!admit(target, &code)) {
+        QJsonObject err;
+        err[QStringLiteral("type")] = QStringLiteral("error");
+        err[QStringLiteral("reason")] = code;
+        target->sendJson(err);
+        target->close();
+    }
+    return true;
+}
+
+bool TransferSession::onPolicy(const QJsonObject &msg, qint64 nowMs)
+{
+    if (m_state != State::Active && m_state != State::Delegated)
+        return false;
+
+    // Неверное значение отвергает сообщение целиком, пока ничего не
+    // поменяно.
+    const QString onLeave = msg.value(QStringLiteral("on_owner_leave")).toString();
+    if (msg.contains(QStringLiteral("on_owner_leave"))
+        && onLeave != QLatin1String("close") && onLeave != QLatin1String("freeze"))
+        return false;
+
+    // Использования — новое значение остатка, а не прибавка: владелец
+    // видит «осталось 2» и ставит «осталось 5». null — без лимита.
+    if (msg.contains(QStringLiteral("uses"))) {
+        const QJsonValue uses = msg.value(QStringLiteral("uses"));
+        if (uses.isNull()) {
+            m_usesLeft = -1;
+        } else {
+            const double n = uses.toDouble(-1);
+            if (n < 0 || n != std::floor(n) || n > 1e6)
+                return false;
+            m_usesLeft = int(n);
+        }
+    }
+    // Срок — сколько жить начиная с этой минуты. Потолок тот же, что у
+    // offer: неделя, считая от сейчас.
+    if (msg.contains(QStringLiteral("ttl_ms"))) {
+        const double ttl = msg.value(QStringLiteral("ttl_ms")).toDouble(-1);
+        if (ttl < 0)
+            return false;
+        m_expiresAtMs = nowMs + std::clamp<qint64>(qint64(ttl), 60 * 1000, kMaxTtlMs);
+    }
+    if (msg.contains(QStringLiteral("require_approval")))
+        m_requireApproval = msg.value(QStringLiteral("require_approval")).toBool(false);
+    if (msg.contains(QStringLiteral("leave_open")))
+        m_leaveOpen = msg.value(QStringLiteral("leave_open")).toBool(false);
+    if (msg.contains(QStringLiteral("on_owner_leave")))
+        m_freezeOnLeave = onLeave == QLatin1String("freeze");
+
+    // Подтверждение выключили — ждущим больше нечего ждать.
+    if (!m_requireApproval && !m_pending.isEmpty()) {
+        QJsonObject all;
+        all[QStringLiteral("ok")] = true;
+        all[QStringLiteral("all")] = true;
+        onApprove(all);
+    }
+
+    const QJsonObject state = stateJson(nowMs);
+    if (m_owner)
+        m_owner->sendJson(state);
+    broadcastToReceivers(state);
+    return true;
+}
+
+void TransferSession::revoke()
+{
+    qInfo().noquote() << QStringLiteral("владелец закрыл доступ");
+    closeWith(QString::fromLatin1(ferry::err::kRevoked));
+    emit needsClosing(this);
 }
 
 bool TransferSession::onHashes(const QJsonObject &msg, QString *errorCode)
@@ -588,7 +1061,7 @@ bool TransferSession::onPeerFrame(ClientSession *peer, const QByteArray &frame,
         return false;
     };
 
-    if (!m_hasOffer || m_state != State::Active)
+    if (!m_hasOffer || (m_state != State::Active && m_state != State::Delegated))
         return fail(ferry::err::kBadMessage);
     if (frame.size() < int(ferry::kBinaryHeaderSize))
         return fail(ferry::err::kBadMessage);
@@ -696,7 +1169,7 @@ quint64 TransferSession::slowestCursor() const
 
 void TransferSession::tick(qint64 nowMs)
 {
-    if (m_state != State::Active || !m_sender || !m_hasOffer)
+    if (!m_hasOffer || (m_state != State::Active && m_state != State::Delegated))
         return;
 
     forgetStalledBackfill(nowMs);
@@ -709,6 +1182,13 @@ void TransferSession::tick(qint64 nowMs)
         else
             ++it;
     }
+
+    if (m_state == State::Delegated) {
+        checkDelegated(nowMs);
+        return;
+    }
+    if (!m_sender)
+        return;
 
     // Ждём ли мы чего-то от отправителя прямо сейчас.
     const bool outstanding = m_requestedUpTo >= qint64(m_window.endIndex());
@@ -745,7 +1225,7 @@ void TransferSession::forgetStalledBackfill(qint64 nowMs)
 
 void TransferSession::pump()
 {
-    if (m_state != State::Active || !m_hasOffer)
+    if (!m_hasOffer || (m_state != State::Active && m_state != State::Delegated))
         return;
 
     // 1. Отдать каждому получателю то, что для него уже лежит в окне.
@@ -771,8 +1251,10 @@ void TransferSession::pump()
             if (frame.isEmpty())
                 break;
             // Живая волна не пересылает то, что у получателя уже есть:
-            // при докачке с дырками это целые мегабайты впустую.
-            if (!r->have().has(r->cursor())) {
+            // при докачке с дырками это целые мегабайты впустую. И то, что
+            // уже уехало второй волной: без отправителя вторая волна идёт
+            // и впереди курсора, и вернувшийся источник иначе повторил бы её.
+            if (!r->have().has(r->cursor()) && !r->sent().has(r->cursor())) {
                 r->sendBinary(frame);
                 r->sent().set(r->cursor());
                 r->countFromWindow();
@@ -940,10 +1422,13 @@ void TransferSession::requestBackfill()
         if (r->pendingBytes() >= kSocketHighWater)
             continue;
 
+        // Пока отправитель на связи, всё, что за курсором, привезёт живая
+        // волна. Без него живой волны нет, и вторая тянет том целиком.
+        const quint64 edge = m_sender ? r->cursor() : m_chunkCount;
         quint64 i = r->backfillHint();
         while (!full()) {
             i = nextMissing(r, i);
-            if (i >= r->cursor())
+            if (i >= edge)
                 break;
             if (m_window.contains(i) || m_backfillInFlight.has(i)) {
                 ++i;
@@ -1011,7 +1496,7 @@ void TransferSession::deliverBackfillFrame(quint64 index, const QByteArray &fram
             continue;
         if (r->have().has(index))
             continue;
-        if (index >= r->cursor())
+        if (m_sender && index >= r->cursor())
             continue;   // это ему привезёт живая волна
         r->sendBinary(frame);
         r->sent().set(index);
@@ -1146,6 +1631,16 @@ void TransferSession::closeWith(const QString &reasonCode)
     broadcastToReceivers(err);
     if (m_sender)
         m_sender->sendJson(err);
+    if (m_owner && m_owner != m_sender) {
+        m_owner->sendJson(err);
+        m_owner->setTransfer(nullptr);
+    }
+    m_owner = nullptr;
+    for (ClientSession *r : std::as_const(m_pending)) {
+        r->sendJson(err);
+        r->setTransfer(nullptr);
+    }
+    m_pending.clear();
 
     // Разрываем связь в ОБЕ стороны. Сессия сейчас уйдёт в deleteLater, а
     // сокеты переживут её на несколько тактов цикла событий — и первый же

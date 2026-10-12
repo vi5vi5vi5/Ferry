@@ -10,10 +10,17 @@
 // ничего сверх этого не выдумывается: курсор на карте тома стоит только
 // у того, кто качает подряд с начала, — у догоняющего форма принятого
 // неизвестна.
+//
+// Та же накладная служит и владельцу, который ушёл и вернулся по ссылке
+// владельца (#manage=…): тогда груза в вкладке нет, воркеров тоже — один
+// сокет с resume_owner, получатели, условия и кнопки управления.
 
-import { fetchMeta } from './api.js';
+import { fetchMeta, wsUrl, isValidTransferId, MASTER_KEY_SIZE } from './api.js';
+import { b64urlDecode } from './b64.js';
 import { chunkSizeFor } from './manifest.js';
+import { deriveKey, randomSalt } from './password.js';
 import { encodeQr, qrPath } from './qr.js';
+import { openVolume } from './volume.js';
 import { NB, grp, comma, plural, unitOf, inUnit, unitName, size, dur, pct, mbps, copy } from './ui.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -22,6 +29,43 @@ const SVG = 'http://www.w3.org/2000/svg';
 const MAX_ROUTES = 6;
 const META_EVERY_MS = 5000;
 const MAP_CELLS = 120;
+const DAY_MS = 24 * 3600 * 1000;
+const MAX_TTL_MS = 7 * DAY_MS;
+const MORE_USES = 5;
+
+// Эта вкладка отпустила раздачу «работать без меня»: ссылка владельца
+// лежит здесь, пока вкладку не закроют, — после перезагрузки главная
+// предложит вернуться к управлению.
+export const OWNED_KEY = 'ferry.owned';
+
+// Ссылка владельца: …/#manage=<id>.<owner_token>[.<ключ>]. Ключа нет у
+// раздачи по паролю — его не знает и сам владелец, пока не введёт пароль.
+export function parseManageLink(text) {
+    let url;
+    try {
+        url = new URL(String(text || '').trim());
+    } catch {
+        return null;
+    }
+    const m = /^#manage=([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)(?:\.([A-Za-z0-9_-]+))?$/.exec(url.hash);
+    if (!m || !isValidTransferId(m[1]))
+        return null;
+    const token = b64urlDecode(m[2]);
+    if (!token || token.length < 16)
+        return null;
+    let key = '';
+    if (m[3]) {
+        const raw = b64urlDecode(m[3]);
+        if (!raw || raw.length !== MASTER_KEY_SIZE)
+            return null;
+        key = m[3];
+    }
+    return { origin: url.origin, id: m[1], token: m[2], key };
+}
+
+export function manageLink(origin, id, token, key) {
+    return `${origin}/#manage=${id}.${token}${key ? '.' + key : ''}`;
+}
 
 const PREP = {
     creating: ['Заводим раздачу на релее…',
@@ -30,6 +74,10 @@ const PREP = {
         'Этот релей не умеет хеши на лету, поэтому ссылка появится, когда весь том будет посчитан.'],
     offering: ['Отдаём релею опись…',
         'Опись зашифрована тем же ключом: релей не видит ни имён, ни состава тома.'],
+    deriving: ['Выводим ключ из пароля…',
+        'Argon2id, 64 МиБ памяти. Это нарочно небыстро: так же небыстро будет и тому, кто захочет подобрать пароль.'],
+    resuming: ['Возвращаемся к раздаче…',
+        'Ссылка владельца подтверждает права на релее. Тома в этой вкладке нет — он у тех, кто скачал его целиком.'],
 };
 
 const ENDS = {
@@ -38,6 +86,16 @@ const ENDS = {
     server_busy: ['Релей сейчас занят', 'Упёрлись в потолок раздач или памяти на релее. Попробуйте чуть позже.', 'warn', 'релей занят'],
     owner_conflict: ['Релей не признал раздачу', 'Токен владельца не подошёл — так бывает, если черновик раздачи истёк. Начните заново.', 'danger', 'отказ'],
     read: ['Файл изменился или пропал', 'Чтение с диска не удалось, и отдавать дальше нечего. Выберите груз заново.', 'danger', 'груз не читается'],
+    unsupported: ['Релей этого не умеет', 'Выбранные условия этот релей не поддерживает. Отправьте без них или обновите релей.', 'warn', 'не поддерживается'],
+    revoked: ['Доступ закрыт', 'Раздачу закрыли по ссылке владельца. Ссылка больше не работает.', 'warn', 'доступ закрыт'],
+    uses_exhausted: ['Использования кончились', 'Все, кому было можно, забрали том, и раздача закрылась.', 'warn', 'всё забрали'],
+    sender_gone: ['Раздавать стало некому', 'Ушли все, кто скачал том целиком, и раздача без отправителя закрылась. Ссылка больше не работает.', 'warn', 'раздача закрыта'],
+    transfer_not_found: ['Раздачи больше нет', 'Её закрыл срок, кончились использования, доступ закрыли — или без отправителя её стало некому отдавать.', 'warn', 'раздачи нет'],
+};
+// Владелец без тома видит то же по-своему.
+const ENDS_MANAGE = {
+    owner_conflict: ['Управляют не отсюда', 'Ссылку владельца открыли в другой вкладке, или отправитель вернулся с томом. Управлять раздачей можно из одного места.', 'warn', 'управляют не отсюда'],
+    network: ['Связь с релеем оборвалась', 'Раздача от этого не остановилась: её отдают те, кто скачал том целиком. Чтобы снова управлять ею, откройте ссылку владельца ещё раз.', 'warn', 'связь потеряна'],
 };
 const DEFAULT_END = ['Раздача прервалась', 'Что-то пошло не так, и продолжать вслепую мы не стали.', 'danger', 'прервана'];
 
@@ -113,14 +171,26 @@ const MINI_BOAT = (stripe) => `<svg viewBox="0 0 56 28" width="26" height="13" a
 // ---------------------------------------------------------------- состояние
 
 class View {
-    constructor(cargo, policy, hooks) {
+    constructor(cargo, policy, hooks, manage = null) {
         this.cargo = cargo;
         this.policy = policy;
         this.hooks = hooks;
-        this.total = cargo.total;
-        this.chunkSize = chunkSizeFor(cargo.total);
-        this.count = Math.ceil(this.total / this.chunkSize);
+        this.manage = manage;
+        this.total = cargo ? cargo.total : 0;
+        this.chunkSize = cargo ? chunkSizeFor(cargo.total) : 0;
+        this.count = cargo ? Math.ceil(this.total / this.chunkSize) : 0;
+        this.name = cargo ? cargo.manifest.name : '';
+        this.passwordMode = !!(policy && policy.password);
+        this.passwordText = this.passwordMode ? policy.password : '';
+        this.passwordShown = this.passwordMode ? (policy.passwordShown || policy.password) : '';
         this.phase = 'preparing';
+        this.ownerToken = '';
+        this.features = [];
+        // Последнее, что релей сказал об условиях: state, resume_ok или
+        // метаданные. at — когда, чтобы срок тикал между обновлениями.
+        this.cond = null;
+        this.knocks = new Map();    // id → { name, at } — ждут у двери
+        this.ws = null;
         this.link = '';
         this.key = '';
         this.id = '';
@@ -140,7 +210,28 @@ class View {
     // ---- ход ----
 
     start() {
+        (this.manage ? this.startManage() : this.startSend()).catch((e) => {
+            this.onEvent({ ev: 'failed', code: (e && e.code) || 'internal', message: (e && e.message) || String(e) });
+        });
+        this.timers.push(setInterval(() => this.tick(), 1000));
+        this.renderAll();
+    }
+
+    async startSend() {
         const { cargo } = this;
+        let password = null;
+        // Ключ из пароля выводится здесь, до воркеров: Argon2id живёт в
+        // своём классическом воркере (hash-wasm собран как UMD), а в
+        // send.worker приходят уже 32 байта и соль.
+        if (this.passwordMode) {
+            this.prepPhase = 'deriving';
+            this.renderPrep();
+            const salt = randomSalt();
+            const key = await deriveKey(this.passwordText, salt);
+            if (this.phase !== 'preparing')
+                return;
+            password = { key, salt };
+        }
         const ch = new MessageChannel();
         const hasher = new Worker('/assets/js/hash.worker.js', { type: 'module' });
         const worker = new Worker('/assets/js/send.worker.js', { type: 'module' });
@@ -151,17 +242,121 @@ class View {
         hasher.onerror = (e) => this.onEvent({ ev: 'failed', code: 'internal', message: e.message || 'воркер хешей упал' });
         hasher.postMessage({ cmd: 'start', port: ch.port1, files: cargo.files, manifest: cargo.manifest,
             chunkSize: this.chunkSize }, [ch.port1]);
+        const policy = { ...this.policy };
+        delete policy.password;
+        delete policy.passwordShown;
         worker.postMessage({ cmd: 'start', hashPort: ch.port2, files: cargo.files, manifest: cargo.manifest,
-            chunkSize: this.chunkSize, policy: this.policy, origin: location.origin }, [ch.port2]);
-        this.timers.push(setInterval(() => this.tick(), 1000));
-        this.renderAll();
+            chunkSize: this.chunkSize, policy, password, origin: location.origin }, [ch.port2]);
+        if (password)
+            password.key.fill(0);
     }
 
-    stop() {
-        if (this.worker && (this.phase === 'live' || this.phase === 'preparing')) {
-            this.worker.postMessage({ cmd: 'stop' });
+    // Владелец вернулся без тома: метаданные — чтобы знать размер и режим,
+    // ключ из ссылки — чтобы показать имя, и сокет с resume_owner.
+    async startManage() {
+        const m = this.manage;
+        this.id = m.id;
+        this.ownerToken = m.token;
+        this.key = m.key;
+        this.prepPhase = 'resuming';
+        this.renderAll();
+        let meta;
+        try {
+            meta = await fetchMeta(location.origin, m.id);
+        } catch (e) {
+            this.end('failed', e.code || 'network', e.message === e.code ? '' : e.message);
+            return;
+        }
+        this.total = meta.total;
+        this.chunkSize = meta.chunkSize;
+        this.count = meta.chunks;
+        this.passwordMode = meta.mode === 'password';
+        if (m.key) {
+            try {
+                const vol = await openVolume(meta, b64urlDecode(m.key));
+                this.name = vol.manifest.name;
+            } catch {
+                // Ключ не подошёл к манифесту — управлять можно и без имени.
+            }
+        }
+        if (this.phase !== 'preparing')
+            return;
+        this.renderAll();
+
+        const ws = new WebSocket(wsUrl(location.origin));
+        this.ws = ws;
+        let lastError = '';
+        ws.onopen = () => ws.send(JSON.stringify({ type: 'resume_owner', id: m.id, owner_token: m.token, serve: false }));
+        ws.onmessage = (ev) => {
+            if (typeof ev.data !== 'string')
+                return;
+            let v;
+            try {
+                v = JSON.parse(ev.data);
+            } catch {
+                return;
+            }
+            switch (v.type) {
+            case 'resume_ok':
+                this.features = Array.isArray(v.features) ? v.features : [];
+                this.onEvent({ ev: 'ready', id: m.id, link: `${location.origin}/t/${m.id}`, key: m.key,
+                    ownerToken: m.token, features: this.features });
+                this.onEvent({ ev: 'state', state: v });
+                break;
+            case 'peers':
+                this.onEvent({ ev: 'peers', receivers: Array.isArray(v.receivers) ? v.receivers : [] });
+                break;
+            case 'approval_request':
+                this.onEvent({ ev: 'knock', receiver: v.receiver, name: typeof v.name === 'string' ? v.name : '' });
+                break;
+            case 'approval_cancel':
+                this.onEvent({ ev: 'knockGone', receiver: v.receiver });
+                break;
+            case 'state':
+                this.onEvent({ ev: 'state', state: v });
+                break;
+            case 'error':
+                lastError = String(v.reason || 'unknown');
+                this.onEvent({ ev: 'failed', code: lastError });
+                break;
+            default:
+                break;
+            }
+        };
+        ws.onclose = () => {
+            if (this.phase === 'live' || this.phase === 'preparing')
+                this.onEvent({ ev: 'failed', code: lastError || 'network' });
+        };
+    }
+
+    // Команда владельца релею: пустить, отказать, поменять условия.
+    owner(msg) {
+        if (this.phase !== 'live')
+            return;
+        if (this.manage) {
+            if (this.ws && this.ws.readyState === 1)
+                this.ws.send(JSON.stringify(msg));
+        } else if (this.worker) {
+            this.worker.postMessage({ cmd: 'owner', msg });
+        }
+    }
+
+    // revoke — «Закрыть доступ»: релей закрывает раздачу для всех. Без
+    // него закрыть сокет при «работать без меня» значило бы просто уйти.
+    stop(revoke = false) {
+        const running = this.phase === 'live' || this.phase === 'preparing';
+        if (this.manage && running) {
+            if (this.ws && this.ws.readyState === 1) {
+                if (revoke)
+                    this.ws.send(JSON.stringify({ type: 'revoke' }));
+                this.ws.close(1000);
+            }
+            this.end('closed');
+        } else if (this.worker && running) {
+            this.worker.postMessage({ cmd: 'stop', revoke });
             this.end('closed');
         } else {
+            this.phase = this.phase === 'preparing' ? 'closed' : this.phase;
             this.dispose();
         }
     }
@@ -175,6 +370,8 @@ class View {
         const ws = this.workers;
         this.workers = [];
         setTimeout(() => ws.forEach((w) => w.terminate()), delay);
+        if (this.ws && this.ws.readyState <= 1)
+            this.ws.close(1000);
     }
 
     onEvent(m) {
@@ -190,6 +387,16 @@ class View {
             this.id = m.id;
             this.link = m.link;
             this.key = m.key;
+            this.ownerToken = m.ownerToken || '';
+            this.features = m.features || [];
+            if (!this.manage) {
+                const p = this.policy;
+                this.cond = { usesLeft: p.uses > 0 ? p.uses : -1, expiresInMs: p.ttlMs, at: performance.now(),
+                    requireApproval: !!p.requireApproval, leaveOpen: !!p.leaveOpen, state: 'active',
+                    maxConcurrent: p.maxConcurrent || 8 };
+                if (p.leaveOpen)
+                    this.rememberOwned();
+            }
             this.renderLink();
             this.pollMeta();
             this.timers.push(setInterval(() => this.pollMeta(), META_EVERY_MS));
@@ -204,6 +411,17 @@ class View {
             break;
         case 'peers':
             this.onPeers(m.receivers);
+            break;
+        case 'knock':
+            this.knocks.set(m.receiver, { name: m.name, at: performance.now() });
+            this.renderKnocks();
+            break;
+        case 'knockGone':
+            this.knocks.delete(m.receiver);
+            this.renderKnocks();
+            break;
+        case 'state':
+            this.applyState(m.state);
             break;
         case 'failed':
             this.end('failed', m.code, m.message);
@@ -249,6 +467,43 @@ class View {
         this.renderMapCursors();
     }
 
+    applyState(v) {
+        const prev = this.cond || {};
+        this.cond = {
+            state: typeof v.state === 'string' ? v.state : prev.state,
+            usesLeft: typeof v.uses_left === 'number' ? v.uses_left : -1,
+            expiresInMs: typeof v.expires_in_ms === 'number' ? v.expires_in_ms : 0,
+            requireApproval: !!v.require_approval,
+            leaveOpen: !!v.leave_open,
+            maxConcurrent: typeof v.max_concurrent === 'number' ? v.max_concurrent : prev.maxConcurrent,
+            at: performance.now(),
+        };
+        // Подтверждение сняли — очередь у двери вошла целиком, ответов от
+        // нас больше не ждут.
+        if (!this.cond.requireApproval)
+            this.knocks.clear();
+        if (!this.manage && this.cond.leaveOpen)
+            this.rememberOwned();
+        this.renderKnocks();
+        this.renderCond();
+        this.renderPol();
+        this.renderLink();
+    }
+
+    ownerLink() {
+        if (!this.id || !this.ownerToken)
+            return '';
+        return manageLink(location.origin, this.id, this.ownerToken, this.passwordMode ? '' : this.key);
+    }
+
+    rememberOwned() {
+        try {
+            sessionStorage.setItem(OWNED_KEY, JSON.stringify({ url: this.ownerLink(), name: this.name }));
+        } catch {
+            // хранилище недоступно — ссылка владельца всё равно на экране
+        }
+    }
+
     async pollMeta() {
         if (this.phase !== 'live' || !this.id)
             return;
@@ -258,7 +513,11 @@ class View {
                 return;
             this.meta = m;
             this.metaAt = performance.now();
+            const prev = this.cond || {};
+            this.cond = { ...prev, state: m.state, usesLeft: m.usesLeft, expiresInMs: m.expiresInMs,
+                requireApproval: m.requireApproval, at: this.metaAt };
             this.renderCond();
+            this.renderPol();
         } catch {
             // Раздача закрылась — это скажет сокет; сеть мигнула — спросим ещё.
         }
@@ -274,6 +533,7 @@ class View {
                 s.rate = 0;
         this.renderCond();
         this.renderRows();
+        this.renderKnocks();
     }
 
     end(phase, code = '', message = '') {
@@ -287,18 +547,31 @@ class View {
             setText('sxEndTitle', 'Доступ закрыт');
             setText('sxEndText', 'Раздача закрыта по вашей команде. Ссылка больше не работает: новые получатели не войдут, а кто качал — остановился.');
         } else {
-            const e = ENDS[code] || DEFAULT_END;
+            const e = this.endOf(code);
             // У чтения своя причина уже в тексте; у остальных подробность
             // из воркера помогает понять, что именно случилось.
-            const detail = ENDS[code] ? (message && message !== code && code !== 'read' ? ` (${message})` : '')
+            const known = ENDS[code] || (this.manage && ENDS_MANAGE[code]);
+            const detail = known ? (message && message !== code && code !== 'read' ? ` (${message})` : '')
                 : ` Код: ${code}${message && message !== code ? `, ${message}` : ''}.`;
+            let text = e[1];
+            // Отправитель с «работать без меня» потерял связь: раздача,
+            // может быть, жива — её держат сиды, и вернуться можно.
+            if (!this.manage && code === 'network' && this.cond && this.cond.leaveOpen && this.ownerToken)
+                text = 'Пропала сеть или релей перезапустили. Если кто-то уже скачал том целиком, раздача продолжается без вас — управлять ею можно по ссылке владельца.';
             setText('sxEndTitle', e[0]);
-            setText('sxEndText', e[1] + detail);
+            setText('sxEndText', text + detail);
             box.classList.add(e[2] === 'warn' ? 'banner' : 'banner--danger');
         }
-        $('#sx-again').hidden = code === 'read';
+        this.knocks.clear();
+        $('#sx-again').hidden = code === 'read' || !!this.manage;
+        $('#sx-manage').hidden = !(!this.manage && phase === 'failed' && code === 'network'
+            && this.cond && this.cond.leaveOpen && this.ownerToken);
         this.renderAll();
         box.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+
+    endOf(code) {
+        return (this.manage && ENDS_MANAGE[code]) || ENDS[code] || DEFAULT_END;
     }
 
     // ---------------------------------------------------------------- картинка
@@ -313,6 +586,8 @@ class View {
         this.renderMap();
         this.renderMapCursors();
         this.renderCond();
+        this.renderKnocks();
+        this.renderPol();
     }
 
     renderHead() {
@@ -320,7 +595,13 @@ class View {
         stamp.className = 'stamp';
         let a = 'готовим ссылку';
         let b = 'груз на причале';
-        if (this.phase === 'live') {
+        if (this.manage && this.phase === 'preparing') {
+            a = 'возвращаемся';
+            b = 'ссылка владельца';
+        } else if (this.manage && this.phase === 'live') {
+            a = 'без отправителя';
+            b = this.receivers.length ? 'раздают скачавшие' : 'ждём получателей';
+        } else if (this.phase === 'live') {
             a = 'раздача идёт';
             b = this.receivers.length ? 'принято к перевозке' : 'ждём получателей';
         } else if (this.phase === 'closed') {
@@ -328,7 +609,7 @@ class View {
             a = 'доступ закрыт';
             b = 'по команде отправителя';
         } else if (this.phase === 'failed') {
-            const e = ENDS[this.code] || DEFAULT_END;
+            const e = this.endOf(this.code);
             stamp.classList.add(e[2] === 'warn' ? 'stamp--warn' : 'stamp--danger');
             a = e[3];
             b = 'раздача закрыта';
@@ -344,7 +625,11 @@ class View {
         $('#sx-confirm').hidden = ended || !this.confirming;
         $('#sx-close').disabled = this.phase !== 'live';
         $('#send').classList.toggle('sx-ended', ended);
-        document.title = `${ended ? 'Раздача закрыта' : 'Раздача'} · ${this.cargo.manifest.name} — Ferry`;
+        $('#send').classList.toggle('sx-manage', !!this.manage);
+        setText('sxPort', this.manage ? 'отправителя нет' : 'ваш порт');
+        const n = ended ? 0 : this.knocks.size;
+        document.title = `${n ? `(${n}) Пустить? · ` : ''}${ended ? 'Раздача закрыта' : this.manage ? 'Управление' : 'Раздача'}`
+            + `${this.name ? ` · ${this.name}` : ''} — Ferry`;
     }
 
     renderPrep() {
@@ -361,16 +646,103 @@ class View {
         setText('sxPrepSub', sub);
     }
 
+    fullLink() {
+        return this.key ? `${this.link}#${this.key}` : this.link;
+    }
+
     renderLink() {
+        if (!this.link)
+            return;
         setText('sxLink', this.link);
-        setText('sxKey', '#' + this.key);
+        setText('sxKey', this.key ? '#' + this.key : '');
         setText('sxKeyOnly', this.key);
-        const qr = encodeQr(`${this.link}#${this.key}`);
+        $('#sx-copy-bare').hidden = !this.key;
+        if (!this.key)
+            $('#sx-split').hidden = true;
+        let note = 'Часть после решётки — ключ. На сервер она не уходит: её нет ни в запросе, ни в логах, ни в Referer. Кто получил ссылку целиком — получил том.';
+        if (this.passwordMode)
+            note = 'Ссылка без ключа: ключ получатель выведет из пароля. Этот режим слабее ключа — у кого ссылка, тот может перебирать пароли сколько угодно, не спрашивая релей.';
+        else if (!this.key)
+            note = 'В ссылке владельца не было ключа, поэтому здесь ссылка без него. Получателю нужна та, что с ключом, — её вы отправляли раньше.';
+        setText('sxLinkNote', note);
+        setText('sxLinkHead', this.passwordMode ? 'ссылка и пароль' : 'ссылка и ключ');
+        $('#sx-pw').hidden = !(this.passwordMode && this.passwordText);
+        const c = this.cond;
+        $('#sx-owner').hidden = !!this.manage || !this.ownerToken || !(c && c.leaveOpen)
+            || !this.features.includes('policy');
+        const qr = encodeQr(this.fullLink());
         const box = $('#sx-qr');
         box.setAttribute('viewBox', `-2 -2 ${qr.size + 4} ${qr.size + 4}`);
         box.querySelector('path').setAttribute('d', qrPath(qr));
         this.renderHead();
         this.renderPrep();
+    }
+
+    // Очередь у двери. Строки не пересоздаются на каждый тик, иначе
+    // кнопка уходила бы из-под курсора.
+    renderKnocks() {
+        const box = $('#sx-knocks');
+        const live = this.phase === 'live';
+        box.hidden = !live || this.knocks.size === 0;
+        const list = $('#sx-knock-list');
+        const now = performance.now();
+        const want = live ? [...this.knocks.keys()] : [];
+        for (const row of Array.from(list.children))
+            if (!this.knocks.has(Number(row.dataset.id)) || !live)
+                row.remove();
+        want.forEach((id, i) => {
+            const k = this.knocks.get(id);
+            let row = list.querySelector(`[data-id="${id}"]`);
+            if (!row) {
+                row = el('div', 'sx-knock');
+                row.dataset.id = String(id);
+                const who = el('div', 'who');
+                who.append(el('b', '', (k.name && k.name.trim()) || `гость ${id}`), el('span', 'when'));
+                const yes = el('button', 'btn btn-p btn-sm', 'Пустить');
+                yes.type = 'button';
+                yes.addEventListener('click', () => this.answer(id, true));
+                const no = el('button', 'btn btn-sm', 'Отказать');
+                no.type = 'button';
+                no.addEventListener('click', () => this.answer(id, false));
+                row.append(who, yes, no);
+            }
+            if (list.children[i] !== row)
+                list.insertBefore(row, list.children[i] || null);
+            row.querySelector('.when').textContent = `ключ верный · ждёт ${dur(now - k.at)}`;
+        });
+        const n = this.knocks.size;
+        setText('sxKnockTitle', n === 1 ? 'Ждёт вашего решения' : `Ждут вашего решения: ${grp(n)}`);
+        this.renderHead();
+    }
+
+    answer(id, ok) {
+        this.owner({ type: 'approve', receiver: id, ok });
+        // Ответ ушёл — строку убираем сразу; если релей не пустит по
+        // своим причинам, получатель узнает это сам.
+        this.knocks.delete(id);
+        this.renderKnocks();
+    }
+
+    // Ручки условий: подтверждение, «без меня», «продлить», «ещё раз».
+    renderPol() {
+        const live = this.phase === 'live';
+        const can = live && this.features.includes('policy');
+        const c = this.cond || {};
+        $('#sx-pol').hidden = !can;
+        $('#sx-sw-approve').setAttribute('aria-checked', String(!!c.requireApproval));
+        $('#sx-sw-leave').setAttribute('aria-checked', String(!!c.leaveOpen));
+        $('#sx-leave-row').hidden = !!this.manage;
+        $('#sx-extend').hidden = !can;
+        $('#sx-more').hidden = !can || !(c.usesLeft >= 0);
+        const left = this.timeLeft();
+        $('#sx-extend').disabled = left >= MAX_TTL_MS - 3600 * 1000;
+    }
+
+    timeLeft() {
+        const c = this.cond;
+        if (!c)
+            return this.policy ? this.policy.ttlMs : 0;
+        return Math.max(0, c.expiresInMs - (performance.now() - c.at));
     }
 
     renderFlow() {
@@ -521,7 +893,7 @@ class View {
     renderRows() {
         const rows = $('#sx-rows');
         const n = this.receivers.length;
-        const seats = this.policy.maxConcurrent || 8;
+        const seats = (this.cond && this.cond.maxConcurrent) || (this.policy && this.policy.maxConcurrent) || 8;
         setText('sxSeats', `${grp(n)} из ${grp(seats)} ${plural(seats, 'места', 'мест', 'мест')}`);
         const ended = this.phase === 'closed' || this.phase === 'failed';
         $('#sx-none').hidden = n > 0;
@@ -620,22 +992,23 @@ class View {
                 s.append(NB, el('span', 'u', unit));
             return s;
         };
-        const m = this.meta;
-        const usesLeft = m ? m.usesLeft : (this.policy.uses > 0 ? this.policy.uses : -1);
+        const c = this.cond;
+        const usesLeft = c ? c.usesLeft : (this.policy && this.policy.uses > 0 ? this.policy.uses : -1);
         if (usesLeft < 0)
             parts.push(part('без лимита', 'использований'));
         else if (usesLeft === 0)
             parts.push(part('использований', 'не осталось'));
         else
             parts.push(part(`осталось ${grp(usesLeft)}`, plural(usesLeft, 'использование', 'использования', 'использований')));
-        let left = this.policy.ttlMs;
-        if (m)
-            left = Math.max(0, m.expiresInMs - (performance.now() - this.metaAt));
+        const left = this.timeLeft();
         if (this.phase === 'live')
             parts.push(part(`истекает через ${dur(left)}`));
-        else if (this.phase === 'preparing')
+        else if (this.phase === 'preparing' && !this.manage)
             parts.push(part(`срок ${dur(left)}`));
-        parts.push(part(`не более ${grp(this.policy.maxConcurrent || 8)}`, 'одновременно'));
+        const seats = (c && c.maxConcurrent) || (this.policy && this.policy.maxConcurrent) || 8;
+        parts.push(part(`не более ${grp(seats)}`, 'одновременно'));
+        if (c && c.requireApproval)
+            parts.push(part('вход', 'с вашего разрешения'));
         if (this.finished.size)
             parts.push(part(`забрали целиком: ${grp(this.finished.size)}`));
         const out = [];
@@ -646,11 +1019,18 @@ class View {
         });
         box.replaceChildren(...out);
 
+        const seeds = this.receivers.filter((r) => Number(r.progress) >= 1).length;
         let note = 'Раздача идёт, пока открыта эта вкладка.';
         if (this.phase === 'closed' || this.phase === 'failed')
-            note = 'Раздача закрыта. На релее от неё ничего не осталось.';
+            note = this.manage ? 'Раздача закрыта или управляют ею не отсюда.' : 'Раздача закрыта. На релее от неё ничего не осталось.';
+        else if (this.manage)
+            note = 'Отправителя нет: том отдают те, кто скачал его целиком, пока хоть один из них на связи. Эту вкладку можно закрыть — раздача не остановится.';
         else if (usesLeft === 0)
             note = 'Новые получатели не войдут. Кто качает сейчас — докачает, пока открыта эта вкладка.';
+        else if (c && c.leaveOpen)
+            note = seeds
+                ? `Закроете вкладку — раздачу продолжат те, кто скачал том целиком (сейчас ${grp(seeds)}).`
+                : 'Закроете вкладку — раздачу продолжат те, кто скачал том целиком. Пока таких нет: закрыть сейчас значит закрыть раздачу.';
         setText('sxFootNote', note);
     }
 }
@@ -665,7 +1045,47 @@ function wire() {
     wired = true;
     $('#sx-copy').addEventListener('click', (e) => {
         if (V && V.link)
-            copy(`${V.link}#${V.key}`, e.currentTarget);
+            copy(V.fullLink(), e.currentTarget);
+    });
+    $('#sx-copy-owner').addEventListener('click', (e) => {
+        if (V && V.ownerLink())
+            copy(V.ownerLink(), e.currentTarget);
+    });
+    $('#sx-pw-show').addEventListener('click', (e) => {
+        if (!V)
+            return;
+        const on = e.currentTarget.getAttribute('aria-pressed') !== 'true';
+        e.currentTarget.setAttribute('aria-pressed', String(on));
+        e.currentTarget.textContent = on ? 'Скрыть' : 'Показать пароль';
+        setText('sxPwText', on ? V.passwordShown : '••••••••••••');
+    });
+    $('#sx-allow-all').addEventListener('click', () => {
+        if (V)
+            V.owner({ type: 'approve', ok: true, all: true });
+    });
+    $('#sx-sw-approve').addEventListener('click', () => {
+        if (V && V.cond)
+            V.owner({ type: 'policy', require_approval: !V.cond.requireApproval });
+    });
+    $('#sx-sw-leave').addEventListener('click', () => {
+        if (!V || !V.cond)
+            return;
+        const on = !V.cond.leaveOpen;
+        V.owner(on ? { type: 'policy', leave_open: true, on_owner_leave: 'freeze' } : { type: 'policy', leave_open: false });
+    });
+    // Продлить — на сутки от того, что осталось, но не дальше недели от
+    // сейчас: дальше релей всё равно не даст.
+    $('#sx-extend').addEventListener('click', () => {
+        if (V)
+            V.owner({ type: 'policy', ttl_ms: Math.min(V.timeLeft() + DAY_MS, MAX_TTL_MS) });
+    });
+    $('#sx-more').addEventListener('click', () => {
+        if (V && V.cond && V.cond.usesLeft >= 0)
+            V.owner({ type: 'policy', uses: V.cond.usesLeft + MORE_USES });
+    });
+    $('#sx-manage').addEventListener('click', () => {
+        if (V && V.ownerLink())
+            location.assign(V.ownerLink());
     });
     $('#sx-copy-bare').addEventListener('click', (e) => {
         if (!V || !V.link)
@@ -698,7 +1118,12 @@ function wire() {
         if (!V)
             return;
         V.confirming = false;
-        V.stop();
+        V.stop(true);
+        try {
+            sessionStorage.removeItem(OWNED_KEY);
+        } catch {
+            // нечего забывать
+        }
     });
     $('#sx-again').addEventListener('click', () => {
         if (!V)
@@ -716,8 +1141,11 @@ function wire() {
     });
     // Закрыть вкладку — закрыть раздачу: файлы читаются из неё и больше
     // ниоткуда. Спрашиваем, как спрашивает любой загрузчик.
+    // С «работать без меня» и хотя бы одним сидом уход ничего не ломает —
+    // тогда не спрашиваем. Владельцу без тома уходить можно всегда.
     window.addEventListener('beforeunload', (e) => {
-        if (V && (V.phase === 'live' || V.phase === 'preparing')) {
+        const free = V && (V.manage || (V.cond && V.cond.leaveOpen && V.finished.size > 0));
+        if (V && !free && (V.phase === 'live' || V.phase === 'preparing')) {
             e.preventDefault();
             e.returnValue = '';
         }
@@ -728,6 +1156,17 @@ function resetDom() {
     $('#sx-end').hidden = true;
     $('#sx-split').hidden = true;
     $('#sx-again').hidden = false;
+    $('#sx-manage').hidden = true;
+    $('#sx-knocks').hidden = true;
+    $('#sx-knock-list').replaceChildren();
+    $('#sx-owner').hidden = true;
+    $('#sx-pw').hidden = true;
+    $('#sx-pol').hidden = true;
+    $('#sx-extend').hidden = true;
+    $('#sx-more').hidden = true;
+    $('#sx-pw-show').setAttribute('aria-pressed', 'false');
+    $('#sx-pw-show').textContent = 'Показать пароль';
+    setText('sxPwText', '••••••••••••');
     setText('sxLink', '');
     setText('sxKey', '');
     $('#sx-rows').replaceChildren();
@@ -743,6 +1182,18 @@ export function startSending(cargo, policy, hooks) {
         V.stop();
     resetDom();
     V = new View(cargo, policy, hooks);
+    V.start();
+    window.scrollTo(0, 0);
+    return V;
+}
+
+// m — разобранная ссылка владельца (parseManageLink).
+export function startManaging(m, hooks) {
+    wire();
+    if (V)
+        V.stop();
+    resetDom();
+    V = new View(null, null, hooks, m);
     V.start();
     window.scrollTo(0, 0);
     return V;

@@ -6,8 +6,10 @@
 <meta name="color-scheme" content="dark">
 <meta name="referrer" content="no-referrer">
 <!-- Ключ живёт в этой вкладке, поэтому ей нельзя ничего чужого: ни
-     скриптов, ни запросов в сторону. Стили в атрибутах — из макетов. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; worker-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+     скриптов, ни запросов в сторону. Стили в атрибутах — из макетов.
+     wasm-unsafe-eval — только для Argon2id в режиме пароля: он разрешает
+     собрать WebAssembly из своего же скрипта, но не eval. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <title>Ferry — приём тома</title>
 <link rel="icon" href="data:,">
 <!-- Сцены перенесены из макета «Ferry · ночная переправа» (Claude Design)
@@ -255,6 +257,13 @@
     </div>
   </header>
   <p class="lead-sub" data-t="bootText">Читаю ссылку…</p>
+  <form class="pw-form" id="pw-form" hidden>
+    <div class="field-row">
+      <div class="field"><label for="pw-in">пароль к раздаче</label><input id="pw-in" type="password" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <button type="submit" class="btn btn-p" id="pw-go">Открыть</button>
+    </div>
+    <p class="caption" id="pw-note" data-t="pwNote">Пароль присылают отдельно от ссылки — голосом или другим мессенджером. Регистр, лишние пробелы и «ё» не важны. Попытка ничего не стоит: сервер о ней не знает, и использование не списывается.</p>
+  </form>
   <noscript><p class="lead-sub">Для приёма в браузере нужен JavaScript. Без него том можно забрать клиентом Ferry из терминала: <span class="mono">ferry get "ссылка"</span>.</p></noscript>
 </article>
 

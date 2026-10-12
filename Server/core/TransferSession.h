@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QHash>
 #include <QList>
@@ -26,9 +27,17 @@ class TransferSession : public QObject
     Q_OBJECT
 public:
     enum class State {
-        Draft,    // создана по POST, но offer ещё не пришёл: живёт 60 секунд
-        Active,   // отправитель на связи
+        Draft,      // создана по POST, но offer ещё не пришёл: живёт 60 секунд
+        Active,     // отправитель на связи
+        Delegated,  // отправитель ушёл, раздают те, кто скачал целиком (§5)
         Closed,
+    };
+
+    // Чем кончилось hello.
+    enum class Admission {
+        Rejected,   // отказ, код в errorCode
+        Admitted,   // принят: hello_ok уже ушёл
+        Pending,    // ждёт решения владельца: ушёл approval_pending
     };
 
     TransferSession(const QByteArray &id, const QByteArray &ownerToken, QObject *parent = nullptr);
@@ -47,6 +56,7 @@ public:
     qint64 createdAtMs() const { return m_createdAtMs; }
     qint64 expiresAtMs() const { return m_expiresAtMs; }
     int usesLeft() const { return m_usesLeft; }
+    bool requiresApproval() const { return m_requireApproval; }
 
     // ---- настройка ----
     // Окно задаётся снаружи (из конфига) и может ужиматься, когда раздач
@@ -82,16 +92,45 @@ public:
     // ---- участники ----
     void attachSender(ClientSession *sender);
     // Проверка политики (использования, TTL, потолок одновременных) и
-    // подключение. errorCode получает код из §8.
+    // подключение. errorCode получает код из §8. Если раздача спрашивает
+    // владельца, получатель встаёт в очередь (Pending) и ничего не
+    // списывается, пока владелец не ответит.
     //
     // hello разбирается здесь целиком, а не в TransferServer: из него
     // берутся и карта уже принятого (`have` диапазонами или `have_upto`
     // префиксом у клиента M1), и объявленные клиентом возможности.
     // Курсор ставится на конец непрерывного начала, и повторно эти чанки
     // не уезжают.
-    bool attachReceiver(ClientSession *receiver, const QJsonObject &hello, qint64 nowMs,
-                        QString *errorCode);
+    Admission attachReceiver(ClientSession *receiver, const QJsonObject &hello, qint64 nowMs,
+                             QString *errorCode);
     void detach(ClientSession *session);
+
+    // ---- владелец (§5) ----
+    //
+    // Владелец и источник — разные вещи. Пока отправитель на связи, это
+    // одно соединение. Ушёл и вернулся по owner_token из другой вкладки —
+    // он снова распоряжается раздачей, но файлов у него может и не быть,
+    // и тогда источником он не становится.
+    ClientSession *owner() const { return m_owner; }
+
+    // Владелец вернулся. serve — у него есть том и он готов отдавать:
+    // тогда раздача снова Active и живая волна продолжается с того места,
+    // где остановилась. Прежнее соединение владельца, если оно ещё
+    // числится, вытесняется: полуживой сокет не должен держать управление.
+    bool resumeOwner(ClientSession *session, bool serve, QString *errorCode);
+
+    // Сообщения владельца. false — bad_message.
+    bool onApprove(const QJsonObject &msg);
+    bool onPolicy(const QJsonObject &msg, qint64 nowMs);
+    void revoke();
+
+    // Сводка для владельца и получателей: состояние и политика сейчас.
+    QJsonObject stateJson(qint64 nowMs) const;
+
+    // Что сервер умеет. Здесь, а не в TransferServer, потому что hello_ok
+    // теперь уходит и отсюда — когда владелец пустил того, кто ждал.
+    static QJsonArray serverFeatures();
+    static QString stateName(State state);
 
     ClientSession *sender() const { return m_sender; }
     const QList<ClientSession *> &receivers() const { return m_receivers; }
@@ -149,10 +188,30 @@ public:
 
     void closeWith(const QString &reasonCode);
 
+    // Живёт ли раздача без отправителя (§5): сид есть, использования не
+    // кончились у тех, кому ещё надо. Зовётся на каждый уход и сторожем
+    // реестра — раздачу без участников иначе не тронул бы никто.
+    void checkDelegated(qint64 nowMs);
+
 signals:
     void needsClosing(TransferSession *self);
 
 private:
+    // Пустить получателя: последние проверки политики, курсор, списание
+    // использования, hello_ok и всё, что идёт сразу за ним.
+    bool admit(ClientSession *receiver, QString *errorCode);
+    void rejectPending(ClientSession *receiver, const char *reason);
+    void admitAllPending();
+
+    // Отправитель ушёл: делегировать или закрыть.
+    void onSenderLeft();
+
+    // Есть ли кому раздавать без отправителя: получатель со всем томом,
+    // который умеет отдавать и на которого не жаловались.
+    bool hasSeed() const;
+    bool complete(const ClientSession *receiver) const;
+
+
     void requestFromSender();
     quint64 slowestCursor() const;
     void broadcastToReceivers(const QJsonObject &obj);
@@ -213,6 +272,15 @@ private:
     // Сколько помним, кто что прислал.
     static constexpr qint64 kServedByTtlMs = 30000;
 
+    // Сколько раздача без отправителя ждёт, пока вернётся сид. Веб-
+    // получатель после обрыва переподключается сам, и мгновенное закрытие
+    // наказывало бы всех за секундную заминку у одного.
+    static constexpr qint64 kSeedGraceMs = 30000;
+
+    // Сколько человек может одновременно ждать решения владельца. Больше —
+    // это уже не «друзья по ссылке», а кто-то, кто стучится без остановки.
+    static constexpr int kMaxPending = 16;
+
     // Как часто говорить получателю, откуда к нему едет. Четверть
     // секунды: чаще глазу незачем, реже — быстрая передача успевает
     // кончиться, не услышав ни одного сообщения.
@@ -236,6 +304,9 @@ private:
     QList<QJsonObject> m_hashSegments;   // уже готовые сообщения hashes
     QJsonObject m_hashesDoneMsg;
     QString m_mode = QStringLiteral("key");
+    // Соль Argon2id для режима «пароль вместо ключа». Не секрет: отдаётся
+    // всем по GET, чтобы получатель вывел ключ из пароля сам.
+    QByteArray m_passwordSalt;
 
     quint64 m_totalBytes = 0;
     quint32 m_chunkSize = 0;
@@ -243,14 +314,23 @@ private:
 
     int m_usesLeft = -1;          // -1 — без лимита
     int m_maxConcurrent = 8;
+    bool m_requireApproval = false;
+    bool m_leaveOpen = false;
+    // Что делать с подтверждением, когда владелец ушёл: true — снять
+    // и пускать всех с ключом, false — закрыть раздачу.
+    bool m_freezeOnLeave = false;
+    // С какого момента без отправителя нет ни одного сида. 0 — сид есть.
+    qint64 m_noSeedSinceMs = 0;
     qint64 m_createdAtMs = 0;
     qint64 m_expiresAtMs = 0;
 
     State m_state = State::Draft;
     bool m_hasOffer = false;
 
-    ClientSession *m_sender = nullptr;       // не владеет
+    ClientSession *m_sender = nullptr;       // источник; не владеет
+    ClientSession *m_owner = nullptr;        // тот, кто распоряжается; не владеет
     QList<ClientSession *> m_receivers;      // не владеет
+    QList<ClientSession *> m_pending;        // ждут решения владельца
     quint32 m_nextReceiverId = 1;
 
     RingWindow m_window;

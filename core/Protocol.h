@@ -83,6 +83,13 @@ inline constexpr uint64_t kHashSegmentMax = 8192;
 inline constexpr const char *kFeaturesHeader = "X-Ferry-Features";
 inline constexpr const char *kFeatureStreamHashes = "stream_hashes";
 
+// M4. policy — релей понимает approve/policy/revoke/resume_owner и
+// уход владельца с делегированием; password — режим «пароль вместо
+// ключа» (соль в метаданных). Клиент прячет соответствующие ручки,
+// если релей их не объявил.
+inline constexpr const char *kFeaturePolicy = "policy";
+inline constexpr const char *kFeaturePassword = "password";
+
 // Коды ошибок (§8). Строками, а не числами: они уходят в JSON и читаются
 // человеком в логе клиента.
 namespace err {
@@ -98,6 +105,9 @@ inline constexpr const char *kChunkMismatch = "chunk_mismatch";
 inline constexpr const char *kServerBusy = "server_busy";
 inline constexpr const char *kOwnerConflict = "owner_conflict";
 inline constexpr const char *kBadMessage = "bad_message";
+// Владелец закрыл доступ сам. Отличается от sender_gone: раздача не
+// оборвалась, её остановили нарочно, и ждать её обратно бессмысленно.
+inline constexpr const char *kRevoked = "revoked";
 // Отправитель ещё считает хеши, а клиент не умеет получать их на лету.
 // Не отказ, а «зайдите через минуту»: как только список досчитан, раздача
 // для такого клиента ничем не отличается от обычной.

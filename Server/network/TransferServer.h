@@ -70,6 +70,9 @@ private:
     void handleHave(ClientSession *session, const QJsonObject &msg);
     void handleRequest(ClientSession *session, const QJsonObject &msg);
     void handleBadChunk(ClientSession *session, const QJsonObject &msg);
+    // approve / policy / revoke — только от владельца раздачи.
+    void handleOwner(ClientSession *session, const QJsonObject &msg, const QString &type);
+    void handleResumeOwner(ClientSession *session, const QJsonObject &msg);
 
     void sendError(ClientSession *session, const char *reason, bool closeAfter = true);
 

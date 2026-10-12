@@ -13,6 +13,7 @@ import { openVolume } from './volume.js';
 import { summarize } from './manifest.js';
 import { readSavedState, sweepOld, MEMORY_LIMIT } from './store.js';
 import { b64urlDecode } from './b64.js';
+import { normalize as normalizePassword, deriveKey } from './password.js';
 import { NB, grp, comma, plural, unitOf, inUnit, unitName, size, dur, pct, files, dirs, chunks, copy } from './ui.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -219,12 +220,12 @@ const ERRORS = {
     },
     transfer_not_found: {
         pic: 'fog', tone: 'wait', tag: 'раздачи нет', title: 'Такой раздачи нет',
-        text: 'Сервер не знает этой ссылки: раздачу закрыли, у неё вышел срок или сервер перезапускали. Тома на сервере не остаётся — он живёт, только пока отправитель на связи.',
+        text: 'Сервер не знает этой ссылки: раздачу закрыли, у неё вышел срок или сервер перезапускали. Тома на сервере не остаётся — он живёт, только пока на связи отправитель или те, кто скачал его целиком.',
         exit: 'Нужна новая ссылка от отправителя', act: ['request'],
     },
     sender_gone: {
         pic: 'fog', tone: 'wait', tag: 'источник отключён', title: 'Отправитель ушёл',
-        text: 'Отправитель отключился, и продолжать раздачу некому. Тот, кто уже скачал том целиком, доступ выдать не может — он канал, а не полномочие.',
+        text: 'Отправитель отключился, и продолжать раздачу некому: либо он не разрешал ей жить без него, либо никого, кто скачал том целиком, на связи не осталось.',
         exit: 'Нужна новая ссылка от отправителя', act: ['request'],
     },
     uses_exhausted: {
@@ -236,6 +237,11 @@ const ERRORS = {
         pic: 'fog', tone: 'danger', tag: 'срок вышел', title: 'Срок раздачи вышел',
         text: 'У раздачи был срок жизни, и он закончился. Сервер забыл её вместе со всем, что о ней знал.',
         exit: 'Попросите отправителя запустить раздачу заново', act: ['request'],
+    },
+    revoked: {
+        pic: 'fog', tone: 'danger', tag: 'доступ закрыт', title: 'Отправитель закрыл доступ',
+        text: 'Отправитель сам остановил раздачу — для всех сразу. Это не сбой и не обрыв: ждать, что она вернётся, бессмысленно.',
+        exit: 'Если том ещё нужен — напишите отправителю', act: ['request'],
     },
     approval_denied: {
         pic: 'fog', tone: 'danger', tag: 'не подтверждено', title: 'Отправитель не подтвердил доступ',
@@ -438,23 +444,84 @@ async function boot() {
 
     if (link.badKey)
         return showError('bad_key');
-    if (!link.key)
-        return showError('need_key');
+
+    // Без ключа в ссылке это либо обрезанная ссылка, либо раздача по
+    // паролю — узнать можно только у сервера. Не ответил — значит,
+    // скорее всего, обрезали: говорим про ключ, а не про сеть.
+    if (!link.key) {
+        try {
+            S.meta = await fetchMeta(link.origin, link.id);
+        } catch {
+            return showError('need_key');
+        }
+        if (S.meta.mode !== 'password')
+            return showError('need_key');
+    }
     if (!window.isSecureContext || !cryptoAvailable())
         return showError('insecure');
     if (typeof Worker !== 'function')
         return showError('unsupported');
 
-    setText('bootText', 'Спрашиваю сервер о раздаче…');
-    try {
-        S.meta = await fetchMeta(link.origin, link.id);
-    } catch (e) {
-        return showError(e.code || 'network', e.message);
+    if (!S.meta) {
+        setText('bootText', 'Спрашиваю сервер о раздаче…');
+        try {
+            S.meta = await fetchMeta(link.origin, link.id);
+        } catch (e) {
+            return showError(e.code || 'network', e.message);
+        }
     }
 
-    setText('bootText', 'Открываю опись тома ключом из ссылки…');
+    if (S.meta.mode === 'password' && !link.key)
+        return askPassword();
+    await openWithKey(link.key);
+}
+
+// Раздача по паролю: ключа в ссылке нет, его выводят из пароля здесь же,
+// в браузере. Неверный пароль узнаётся по описи — она не расшифруется, —
+// и ни сервер, ни счётчик использований о попытке не знают.
+function askPassword() {
+    const link = S.link;
+    setText('cliCmd', `ferry get "${location.origin}/t/${link.id}"`);
+    setText('bootText', 'Эта раздача по паролю: ключа в ссылке нет, он выводится из пароля.');
+    const form = $('#pw-form');
+    form.hidden = false;
+    $('#pw-in').focus();
+    form.onsubmit = async (e) => {
+        e.preventDefault();
+        const phrase = normalizePassword($('#pw-in').value);
+        if (!phrase)
+            return;
+        const go = $('#pw-go');
+        const note = $('#pw-note');
+        go.disabled = true;
+        note.classList.remove('caption--warn');
+        setText('pwNote', 'Вывожу ключ из пароля — Argon2id, 64 МиБ памяти. На телефоне это несколько секунд.');
+        let key;
+        try {
+            key = await deriveKey(phrase, S.meta.salt);
+            await openVolume(S.meta, key);
+        } catch (err) {
+            go.disabled = false;
+            note.classList.add('caption--warn');
+            setText('pwNote', err && err.code === 'bad_key'
+                ? 'Пароль не подошёл. Проверьте фразу целиком: регистр, лишние пробелы и «ё» не важны, а слова и их порядок — важны.'
+                : `Не получилось вывести ключ: ${err && err.message || err}`);
+            $('#pw-in').select();
+            return;
+        }
+        form.hidden = true;
+        link.key = key;
+        await openWithKey(key);
+    };
+}
+
+async function openWithKey(key) {
+    const link = S.link;
+    setText('bootText', S.meta.mode === 'password'
+        ? 'Открываю опись тома ключом из пароля…'
+        : 'Открываю опись тома ключом из ссылки…');
     try {
-        S.vol = await openVolume(S.meta, link.key);
+        S.vol = await openVolume(S.meta, key);
     } catch (e) {
         return showError(e.code || 'bad_meta', e.message);
     }
@@ -484,7 +551,9 @@ async function boot() {
 
     // Отправителя нет — раздача мертва. Если только том не лежит у нас
     // целиком: тогда сервер не нужен вовсе.
-    if (S.meta.state !== 'active' && !(S.saved && S.saved.complete))
+    // Раздача без отправителя (delegated) жива: том отдают те, кто скачал
+    // его целиком.
+    if (S.meta.state !== 'active' && S.meta.state !== 'delegated' && !(S.saved && S.saved.complete))
         return showError('sender_gone');
 
     const pref = remember('ferry.dest');
@@ -588,8 +657,12 @@ function renderPreview() {
 
     const uses = meta.usesLeft;
     kvs($('#pv-terms'), [
-        ['состояние раздачи', meta.state === 'active' ? 'активна' : 'закрыта', meta.state === 'active' ? '' : 'v--warn'],
-        ['отправитель', meta.state === 'active' ? 'на связи' : 'ушёл', meta.state === 'active' ? 'v--ok' : 'v--warn'],
+        ['состояние раздачи', meta.state === 'active' ? 'активна'
+            : meta.state === 'delegated' ? 'работает без отправителя' : 'закрыта',
+        meta.state === 'closed' ? 'v--warn' : ''],
+        ['отправитель', meta.state === 'active' ? 'на связи'
+            : meta.state === 'delegated' ? 'ушёл, раздают скачавшие целиком' : 'ушёл',
+        meta.state === 'active' ? 'v--ok' : 'v--warn'],
         ['осталось использований', uses < 0 ? 'без лимита' : grp(uses), uses >= 0 && uses <= 1 ? 'v--warn' : ''],
         ['истекает через', meta.expiresInMs > 0 ? dur(meta.expiresInMs) : '—'],
         ['получателей сейчас', grp(meta.receivers)],
@@ -1027,13 +1100,23 @@ function renderRx() {
         $('#rx-stop').hidden = true;
         $('#rx-resume').hidden = false;
         $('#rx-resume').textContent = S.store === 'opfs' ? 'Продолжить приём' : 'Начать заново';
+    } else if (phase === 'approval') {
+        stamp.classList.add('stamp--wait');
+        setText('rxStamp', 'у причала');
+        setText('rxStampSub', 'ждём разрешения');
+        banner.hidden = false;
+        dot.style.background = 'var(--wait)';
+        setText('bannerText', 'Ключ принят. Ждём, пока отправитель пустит.');
+        setText('bannerSub', 'Он видит ваше имя и решает сам. Пока он не ответил, использование ссылки не списано, и уйти можно в любой момент.');
+        bbtn.hidden = true;
     } else if (phase === 'connecting' || phase === 'idle') {
         setText('rxStamp', 'на подходе');
         setText('rxStampSub', 'подключаюсь');
     } else {
         const two = s && s.join > 0 && s.join < s.count;
         setText('rxStamp', 'приём идёт');
-        setText('rxStampSub', two ? 'две волны' : 'одна волна');
+        setText('rxStampSub', s && s.relayState === 'delegated' ? 'без отправителя'
+            : two ? 'две волны' : 'одна волна');
     }
 
     if (!s) {
@@ -1316,7 +1399,11 @@ const SEED_REFUSED = {
     too_many_receivers: 'все места заняты',
     server_busy: 'сервер занят',
     network: 'сервер не отвечает',
+    revoked: 'отправитель закрыл доступ',
 };
+// Эти отказы приходят и посреди раздачи — тогда это не «не вышло»,
+// а «закончилось».
+const SEED_CLOSED = new Set(['uses_exhausted', 'transfer_not_found', 'sender_gone', 'expired', 'revoked']);
 
 function renderSeed() {
     if (S.view !== 'done')
@@ -1333,7 +1420,8 @@ function renderSeed() {
     role.classList.toggle('role--seed', on);
     const served = S.snap ? S.snap.served : S.seed.served || 0;
     const refused = S.seed.refused
-        ? `раздавать не вышло: ${SEED_REFUSED[S.seed.refused] || S.seed.refused}` : '';
+        ? `${SEED_CLOSED.has(S.seed.refused) ? 'раздача закрыта' : 'раздавать не вышло'}: `
+          + `${SEED_REFUSED[S.seed.refused] || S.seed.refused}` : '';
     setText('seedRole', on
         ? `раздаёт другим · отдано ${chunks(served)}`
         : S.closed ? 'закрыто' : want ? 'подключаюсь к раздаче…' : refused || 'готово · не раздаёт');
@@ -1455,14 +1543,21 @@ function wire() {
     });
     $('#done-close').addEventListener('click', onClose);
 
+    // Та же страница, другой ключ. Не «location.hash = …; reload()»: смена
+    // одного якоря — переход внутри страницы, и reload сразу за ним браузеры
+    // исполняют по-разному. replaceState меняет адрес синхронно.
+    const reopenWith = (key) => {
+        history.replaceState(null, '', `${location.pathname}#${key}`);
+        location.reload();
+    };
     $('#err-link').addEventListener('submit', (e) => {
         e.preventDefault();
         const v = $('#err-link-in').value.trim();
         // Ключ могли прислать отдельно от ссылки — тогда вставляют только
         // его: 43 знака base64url, те самые, что стоят после #.
-        if (S.link && /^#?[A-Za-z0-9_-]{43}$/.test(v)) {
-            location.hash = v.replace(/^#/, '');
-            location.reload();
+        const key = v.replace(/\s+/g, '').replace(/^#/, '');
+        if (S.link && /^[A-Za-z0-9_-]{43}$/.test(key)) {
+            reopenWith(key);
             return;
         }
         const l = parseLink(v);
@@ -1472,8 +1567,7 @@ function wire() {
             return;
         }
         if (l.origin === location.origin && location.pathname === `/t/${l.id}`) {
-            location.hash = new URL(v).hash;
-            location.reload();
+            reopenWith(new URL(v).hash.slice(1));
         } else {
             location.href = v;
         }

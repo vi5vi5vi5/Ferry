@@ -29,6 +29,8 @@ public:
         Unknown,    // подключился, но ещё не назвался
         Sender,
         Receiver,
+        Pending,    // доказал ключ, ждёт решения владельца (§5)
+        Owner,      // владелец вернулся без тома: распоряжается, но не отдаёт
     };
 
     explicit ClientSession(QWebSocket *socket, QObject *parent = nullptr);

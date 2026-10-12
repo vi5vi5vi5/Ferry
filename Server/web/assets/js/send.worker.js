@@ -91,6 +91,9 @@ class Sender {
         this.policy = msg.policy || {};
         this.origin = msg.origin;
         this.hashPort = msg.hashPort;
+        // Режим пароля: ключ уже выведен на странице (Argon2id — в своём
+        // воркере), сюда приходят он и соль.
+        this.password = msg.password || null;
         this.chunkSize = msg.chunkSize;
         this.total = this.manifest.total;
         this.count = Math.ceil(this.total / this.chunkSize);
@@ -139,13 +142,25 @@ class Sender {
     async start() {
         this.hashPort.onmessage = (ev) => this.onHashes(ev.data);
 
-        const master = crypto.getRandomValues(new Uint8Array(MASTER_KEY_SIZE));
+        const master = this.password
+            ? new Uint8Array(this.password.key)
+            : crypto.getRandomValues(new Uint8Array(MASTER_KEY_SIZE));
+        if (this.password)
+            this.password.key.fill(0);
         this.noncePrefix = crypto.getRandomValues(new Uint8Array(NONCE_PREFIX_SIZE));
         this.keys = await deriveKeys(master);
         const verifier = await verifierBytes(master);
 
         let created = await this.create();
         this.stream = created.features.includes('stream_hashes');
+        this.features = created.features;
+        // Что релей не умеет — говорим до ссылки, а не после первого
+        // получателя: старый релей молча пропустил бы условия мимо ушей.
+        const p = this.policy;
+        if (this.password && !created.features.includes('password'))
+            throw new SendError('unsupported', 'этот релей не умеет раздачу по паролю');
+        if ((p.requireApproval || p.leaveOpen) && !created.features.includes('policy'))
+            throw new SendError('unsupported', 'этот релей не умеет подтверждение и раздачу без отправителя');
 
         // Релей без хешей на лету: как раньше, весь том до ссылки. Черновик
         // живёт минуту, а подсчёт может идти дольше — тогда нужен свежий.
@@ -166,7 +181,7 @@ class Sender {
 
         const base = created.publicUrl || this.origin;
         this.link = `${base}/t/${created.id}`;
-        this.keyText = b64urlEncode(master);
+        this.keyText = this.password ? '' : b64urlEncode(master);
         master.fill(0);
 
         const offer = {
@@ -178,9 +193,11 @@ class Sender {
             chunks: this.count,
             nonce_prefix: b64urlEncode(this.noncePrefix),
             verifier: b64urlEncode(verifier),
-            mode: 'key',
+            mode: this.password ? 'password' : 'key',
             policy: {},
         };
+        if (this.password)
+            offer.salt = b64urlEncode(this.password.salt);
         verifier.fill(0);
         if (this.stream) {
             offer.hash_mode = 'stream';
@@ -200,6 +217,14 @@ class Sender {
             offer.policy.ttl_ms = this.policy.ttlMs;
         if (this.policy.maxConcurrent > 0)
             offer.policy.max_concurrent = this.policy.maxConcurrent;
+        if (this.policy.requireApproval)
+            offer.policy.require_approval = true;
+        // «Работать без меня» — значит и пускать без меня: после ухода
+        // спрашивать некого, и подтверждение снимается (§5, freeze).
+        if (this.policy.leaveOpen) {
+            offer.policy.leave_open = true;
+            offer.policy.on_owner_leave = 'freeze';
+        }
 
         await this.connect(offer);
     }
@@ -243,6 +268,12 @@ class Sender {
                     this.kick();
                 } else if (v.type === 'peers') {
                     post({ ev: 'peers', receivers: Array.isArray(v.receivers) ? v.receivers : [] });
+                } else if (v.type === 'approval_request') {
+                    post({ ev: 'knock', receiver: v.receiver, name: typeof v.name === 'string' ? v.name : '' });
+                } else if (v.type === 'approval_cancel') {
+                    post({ ev: 'knockGone', receiver: v.receiver });
+                } else if (v.type === 'state') {
+                    post({ ev: 'state', state: v });
                 } else if (v.type === 'error') {
                     this.lastError = String(v.reason || 'unknown');
                     if (!this.accepted) {
@@ -270,6 +301,8 @@ class Sender {
         post({
             ev: 'ready',
             id: this.created.id,
+            ownerToken: this.created.ownerToken,
+            features: this.features,
             link: this.link,
             key: this.keyText,
             chunkSize: this.chunkSize,
@@ -535,9 +568,22 @@ class Sender {
         this.shutdown();
     }
 
-    stop() {
+    // Команда владельца: пустить, поменять условия. Релей отвечает state
+    // или approval_cancel — их и покажет страница.
+    owner(msg) {
+        if (!this.finished && this.accepted && this.ws && this.ws.readyState === 1)
+            this.ws.send(JSON.stringify(msg));
+    }
+
+    stop(revoke) {
         if (this.finished)
             return;
+        // С «работать без меня» просто закрыть сокет значит уйти и оставить
+        // раздачу сидам. «Закрыть доступ» — это отзыв: релей закроет её
+        // для всех, и только потом мы отключаемся.
+        if (revoke && this.accepted && this.ws && this.ws.readyState === 1
+            && (this.features || []).includes('policy'))
+            this.ws.send(JSON.stringify({ type: 'revoke' }));
         this.stopping = true;
         this.finished = true;
         clearInterval(this.timer);
@@ -572,6 +618,8 @@ self.onmessage = (ev) => {
                 sender.fail('internal', (e && e.message) || String(e));
         });
     } else if (msg.cmd === 'stop' && sender) {
-        sender.stop();
+        sender.stop(!!msg.revoke);
+    } else if (msg.cmd === 'owner' && sender) {
+        sender.owner(msg.msg);
     }
 };

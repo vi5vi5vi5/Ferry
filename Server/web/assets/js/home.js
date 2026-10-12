@@ -5,12 +5,13 @@
 // в этой же странице — главную сменяет накладная (sendview.js), а файлы
 // читаются с диска по мере того, как их просит релей.
 
-import { parseLink } from './api.js';
+import { parseLink, fetchMeta } from './api.js';
 import { cryptoAvailable } from './crypto.js';
 import { cargoFromFileList, cargoFromDrop, dropEntries, CargoError } from './cargo.js';
 import { chunkSizeFor } from './manifest.js';
+import { normalize as normalizePassword, problem as passwordProblem } from './password.js';
 import { grp, comma, plural, size, files, copy } from './ui.js';
-import { startSending } from './sendview.js';
+import { startSending, startManaging, parseManageLink, OWNED_KEY } from './sendview.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -24,7 +25,9 @@ function setText(name, value) {
 
 const H = {
     cargo: null,
-    policy: { uses: 0, ttlMs: 86400000, maxConcurrent: 8 },
+    policy: { uses: 0, ttlMs: 86400000, maxConcurrent: 8, requireApproval: false, leaveOpen: false },
+    password: false,
+    features: [],
     canSend: true,
     os: /Windows/i.test(navigator.userAgent) ? 'win' : 'linux',
 };
@@ -37,9 +40,14 @@ async function checkRelay() {
         const r = await fetch('/api/health', { cache: 'no-store', credentials: 'omit' });
         if (!r.ok)
             throw new Error(String(r.status));
-        await r.json();
+        const health = await r.json();
+        H.features = Array.isArray(health.features) ? health.features : [];
         pill.classList.add('ok');
         setText('relayText', `релей на связи · ${location.host}`);
+        // Подтверждение, «без меня» и пароль — только там, где релей их
+        // знает: старый молча пропустил бы условия мимо ушей.
+        $('#acc').hidden = !H.features.includes('policy');
+        $('#pw-row').hidden = !H.features.includes('password');
     } catch {
         pill.classList.add('bad');
         setText('relayText', `релей не отвечает · ${location.host}`);
@@ -231,6 +239,42 @@ function polHint() {
     setText('polHint', u === 1
         ? 'Ссылка сгорит на первом получателе. Использование тратит тот, кто доказал владение ключом, — превью-бот мессенджера его не сжигает.'
         : 'Использование тратит тот, кто доказал владение ключом. Превью-бот мессенджера его не сжигает.');
+    const p = H.policy;
+    setText('leaveText', p.requireApproval && p.leaveOpen
+        ? 'Закроете вкладку — раздачу продолжат те, кто уже скачал том целиком, пока хоть один из них на связи. Спрашивать будет некого, поэтому дальше войдёт любой с ключом, в пределах использований. Вернуться к управлению можно по ссылке владельца.'
+        : 'Закроете вкладку — раздачу продолжат те, кто уже скачал том целиком, пока хоть один из них на связи. Если таких нет, ссылка погаснет. Вернуться к управлению можно по ссылке владельца.');
+    setText('sendFoot', p.leaveOpen
+        ? 'Пока открыта эта вкладка, файлы читаются прямо с вашего диска. Без вас раздача живёт, пока на связи хоть один, кто скачал том целиком.'
+        : 'Раздача идёт, пока открыта эта вкладка: файлы читаются прямо с вашего диска.');
+}
+
+function setSwitch(id, on) {
+    $(id).setAttribute('aria-checked', String(on));
+}
+
+// Пароль проверяется на лету: кнопка «Отправить» ждёт, пока фраза не
+// станет годной. Подсказка говорит, чего не хватает, а не просто «плохо».
+function passwordState() {
+    if (!H.password)
+        return { ok: true, phrase: '' };
+    const phrase = normalizePassword($('#pw-new').value);
+    const why = phrase ? passwordProblem(phrase) : 'Придумайте фразу хотя бы из пяти слов.';
+    return { ok: !why, phrase, why };
+}
+
+function renderPassword() {
+    $('#pw-box').hidden = !H.password;
+    setSwitch('#sw-pw', H.password);
+    const st = passwordState();
+    const input = $('#pw-new');
+    const typed = input.value.trim() !== '';
+    input.setAttribute('aria-invalid', String(H.password && typed && !st.ok));
+    const hint = $('#pw-hint');
+    hint.classList.toggle('caption--warn', H.password && typed && !st.ok);
+    setText('pwHint', !H.password || st.ok
+        ? 'Регистр, лишние пробелы и «ё» не важны. Пять слов, которые не встречаются вместе, — надёжнее, чем одно сложное.'
+        : st.why);
+    $('#send-go').disabled = !st.ok;
 }
 
 // ---------------------------------------------------------------- раздача
@@ -245,10 +289,26 @@ function showHome() {
 function go() {
     if (!H.cargo || !H.canSend)
         return;
+    const pw = passwordState();
+    if (!pw.ok) {
+        $('#pw-new').focus();
+        return;
+    }
+    const policy = { ...H.policy };
+    if (!H.features.includes('policy')) {
+        policy.requireApproval = false;
+        policy.leaveOpen = false;
+    }
+    if (H.password && H.features.includes('password')) {
+        policy.password = pw.phrase;
+        // Показывать на накладной — как набрал человек: выровненную
+        // строчными без «ё» он бы не узнал.
+        policy.passwordShown = $('#pw-new').value.trim().replace(/\s+/g, ' ');
+    }
     $('#home').hidden = true;
     $('#send').hidden = false;
     window.scrollTo(0, 0);
-    startSending(H.cargo, { ...H.policy }, {
+    startSending(H.cargo, policy, {
         onNew() {
             resetCargo();
             showHome();
@@ -314,13 +374,42 @@ function wire() {
         });
     $('#send-go').addEventListener('click', go);
     $('#cargo-reset').addEventListener('click', resetCargo);
+    $('#sw-approve').addEventListener('click', () => {
+        H.policy.requireApproval = !H.policy.requireApproval;
+        setSwitch('#sw-approve', H.policy.requireApproval);
+        polHint();
+    });
+    $('#sw-leave').addEventListener('click', () => {
+        H.policy.leaveOpen = !H.policy.leaveOpen;
+        setSwitch('#sw-leave', H.policy.leaveOpen);
+        polHint();
+    });
+    $('#sw-pw').addEventListener('click', () => {
+        H.password = !H.password;
+        renderPassword();
+        if (H.password)
+            $('#pw-new').focus();
+    });
+    $('#pw-new').addEventListener('input', renderPassword);
+    $('#pw-new').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter')
+            go();
+    });
 
     $('#get-form').addEventListener('submit', (e) => {
         e.preventDefault();
         const input = $('#get-in');
         const v = input.value.trim();
-        const l = parseLink(v);
         const hint = $('#get-hint');
+        // Ссылку владельца тоже можно вставить сюда: она ведёт на эту же
+        // страницу, только с другим фрагментом.
+        if (parseManageLink(v)) {
+            location.href = v;
+            if (new URL(v).pathname === location.pathname)
+                location.reload();
+            return;
+        }
+        const l = parseLink(v);
         if (!l) {
             hint.textContent = 'Это не похоже на ссылку Ferry: нужен адрес вида https://…/t/…#ключ.';
             hint.style.color = 'var(--warn-text)';
@@ -347,7 +436,59 @@ function wire() {
     });
 }
 
+// Ссылка владельца: #manage=id.token[.ключ]. Главная тогда не нужна —
+// сразу накладная без груза, управление раздачей, которая идёт без нас.
+function bootManage() {
+    const m = parseManageLink(location.href);
+    if (!m)
+        return false;
+    $('#home').hidden = true;
+    $('#send').hidden = false;
+    setText('host', location.host);
+    // «Отправить другое» отсюда — просто чистая главная: груза в этой
+    // вкладке не было, держать нечего.
+    startManaging(m, { onNew: () => location.assign(location.pathname) });
+    return true;
+}
+
+// Эта вкладка недавно отпустила раздачу «работать без меня» — например,
+// её перезагрузили. Напомним, что раздача, может быть, ещё жива.
+async function rememberOwned() {
+    let owned = null;
+    try {
+        owned = JSON.parse(sessionStorage.getItem(OWNED_KEY) || 'null');
+    } catch {
+        return;
+    }
+    const m = owned && parseManageLink(owned.url || '');
+    if (!m)
+        return;
+    const forget = () => {
+        try {
+            sessionStorage.removeItem(OWNED_KEY);
+        } catch {
+            // хранилище недоступно — и так забудется
+        }
+        $('#own-left').hidden = true;
+    };
+    try {
+        const meta = await fetchMeta(location.origin, m.id);
+        if (meta.state !== 'delegated')
+            return;
+    } catch (e) {
+        if (e && /not_found|expired|uses_exhausted|revoked|sender_gone/.test(e.code || ''))
+            forget();
+        return;
+    }
+    setText('ownLeftTitle', owned.name ? `Раздача «${owned.name}» идёт без вас.` : 'Ваша раздача идёт без вас.');
+    $('#own-left-go').href = owned.url;
+    $('#own-left-forget').onclick = forget;
+    $('#own-left').hidden = false;
+}
+
 function boot() {
+    if (bootManage())
+        return;
     wire();
     renderInstall();
     // Блок про самоподписанный сертификат — только там, где он уместен: по
@@ -358,7 +499,16 @@ function boot() {
     startLog();
     checkRelay();
     polHint();
+    renderPassword();
+    rememberOwned();
     setText('host', location.host);
 }
+
+// Ссылку владельца могут открыть и в уже открытой главной — тогда
+// меняется только фрагмент, и страница не перезагружается.
+window.addEventListener('hashchange', () => {
+    if (parseManageLink(location.href) && $('#send').hidden)
+        location.reload();
+});
 
 boot();

@@ -4,6 +4,7 @@
 #ifndef _WIN32
 
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -18,6 +19,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -439,6 +441,102 @@ bool consoleStdinIsTty()
 bool copyToClipboard(const std::string &)
 {
     return false;
+}
+
+namespace {
+
+termios g_savedTermios{};
+bool g_keysOn = false;
+
+void restoreTermios()
+{
+    if (g_keysOn) {
+        ::tcsetattr(STDIN_FILENO, TCSANOW, &g_savedTermios);
+        g_keysOn = false;
+    }
+}
+
+} // namespace
+
+bool consoleReadSecret(const std::string &prompt, std::string &out)
+{
+    std::fputs(prompt.c_str(), stderr);
+    std::fflush(stderr);
+
+    const bool tty = ::isatty(STDIN_FILENO) == 1;
+    termios saved{};
+    if (tty && ::tcgetattr(STDIN_FILENO, &saved) == 0) {
+        termios quiet = saved;
+        quiet.c_lflag &= tcflag_t(~ECHO);
+        quiet.c_lflag |= ICANON;
+        ::tcsetattr(STDIN_FILENO, TCSANOW, &quiet);
+    }
+
+    out.clear();
+    char buf[1024];
+    bool got = false;
+    while (std::fgets(buf, sizeof(buf), stdin)) {
+        got = true;
+        out += buf;
+        if (!out.empty() && out.back() == '\n')
+            break;
+    }
+
+    if (tty) {
+        ::tcsetattr(STDIN_FILENO, TCSANOW, &saved);
+        std::fputc('\n', stderr);
+    }
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r'))
+        out.pop_back();
+    return got;
+}
+
+void consoleKeys(bool on)
+{
+    if (::isatty(STDIN_FILENO) != 1)
+        return;
+    if (on && !g_keysOn) {
+        if (::tcgetattr(STDIN_FILENO, &g_savedTermios) != 0)
+            return;
+        termios raw = g_savedTermios;
+        raw.c_lflag &= tcflag_t(~(ICANON | ECHO));
+        raw.c_cc[VMIN] = 0;
+        raw.c_cc[VTIME] = 0;
+        ::tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+        g_keysOn = true;
+        // Терминал без эха после выхода — худшее, что может оставить
+        // после себя консольная программа. Возвращаем при любом выходе.
+        static bool registered = false;
+        if (!registered) {
+            std::atexit(restoreTermios);
+            registered = true;
+        }
+    } else if (!on) {
+        restoreTermios();
+    }
+}
+
+int consolePollKey()
+{
+    if (!g_keysOn)
+        return -1;
+    unsigned char c = 0;
+    if (::read(STDIN_FILENO, &c, 1) != 1)
+        return -1;
+    // Кириллица приходит двумя байтами UTF-8; собираем их в одну точку.
+    if (c >= 0xC0 && c < 0xE0) {
+        unsigned char d = 0;
+        for (int tries = 0; tries < 10; ++tries) {
+            if (::read(STDIN_FILENO, &d, 1) == 1)
+                return int(((c & 0x1F) << 6) | (d & 0x3F));
+            pollfd p{STDIN_FILENO, POLLIN, 0};
+            ::poll(&p, 1, 5);
+        }
+        return -1;
+    }
+    if (c >= 0x80)
+        return -1;
+    return int(c);
 }
 
 int consoleWidth()

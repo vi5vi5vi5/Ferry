@@ -63,8 +63,10 @@ struct TransferMeta
     bool streamHashes = false;
     uint64_t hashed = 0;
     Bytes noncePrefix;
-    std::string mode;
-    std::string state;
+    std::string mode;       // "key" или "password"
+    Bytes salt;             // соль Argon2id; только при mode == "password"
+    std::string state;      // "active", "delegated" или "closed"
+    bool requireApproval = false;
     int receivers = 0;
     int usesLeft = -1;
     int64_t expiresInMs = 0;

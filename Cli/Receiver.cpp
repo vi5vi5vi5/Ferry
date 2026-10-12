@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "Cli/ChunkPump.h"
+#include "Cli/Password.h"
 #include "Cli/VolumeFile.h"
 #include "Cli/Signals.h"
 #include "Cli/net/WebSocketClient.h"
@@ -357,14 +358,6 @@ int runGet(const Options &options)
         link.hasKey = true;
     }
 
-    if (!link.hasKey) {
-        std::fprintf(stderr,
-                     "В ссылке нет ключа — части после решётки.\n"
-                     "%sБез неё расшифровать нечего: сервер ключа не знает и знать не может.\n"
-                     "Попросите прислать ссылку целиком.%s\n", dim(), reset());
-        return 1;
-    }
-
     Relay relay;
     if (!Relay::parse(link.origin(), options.insecure, relay, &err)) {
         std::fprintf(stderr, "%s\n", err.c_str());
@@ -395,22 +388,79 @@ int runGet(const Options &options)
         return 1;
     }
 
-    const TransferKeys keys = TransferKeys::derive(link.key);
-
     // Раздача с хешами на лету, где отправитель ещё считает: манифест
     // промежуточный и лежит под своей меткой, списка пока нет — он приедет
     // сегментами по WebSocket.
     const uint64_t manifestLabel =
         meta.streamHashes ? kMetaLabelStreamManifest : kMetaLabelManifest;
     Bytes manifestPlain;
-    if (!openChunk(keys.meta, meta.noncePrefix.data(), manifestLabel, plan.chunkCount,
-                   meta.manifest.data(), meta.manifest.size(), manifestPlain)) {
-        std::fprintf(stderr,
-                     "Манифест не расшифровался.\n"
-                     "%sЛибо ключ в ссылке не тот, либо сервер описал том иначе, чем\n"
-                     "отправитель: размер тома входит в проверяемые данные.%s\n", dim(), reset());
-        return 1;
+    const auto opens = [&](const Key32 &master) {
+        const TransferKeys k = TransferKeys::derive(master);
+        return openChunk(k.meta, meta.noncePrefix.data(), manifestLabel, plan.chunkCount,
+                         meta.manifest.data(), meta.manifest.size(), manifestPlain);
+    };
+
+    // Раздача по паролю: ключа в ссылке нет и быть не должно — он
+    // выводится из пароля. Проверка пароля — тот же манифест: не
+    // расшифровался, значит пароль не тот. Сервер о попытках не знает и
+    // ничего не списывает.
+    if (meta.mode == "password") {
+        if (link.hasKey) {
+            std::fprintf(stderr, "У этой раздачи вход по паролю, а в ссылке зачем-то ключ. "
+                                 "Уберите часть после решётки.\n");
+            return 1;
+        }
+        const char *env = std::getenv("FERRY_PASSWORD");
+        if (!env && !platform::consoleStdinIsTty()) {
+            std::fprintf(stderr, "Раздача по паролю, а спросить его не у кого: ввод не с "
+                                 "терминала. Для скриптов есть FERRY_PASSWORD.\n");
+            return 1;
+        }
+        if (!env)
+            std::fprintf(stderr, "%sРаздача по паролю. Пароль присылают отдельно от ссылки; "
+                                 "регистр и «ё» не важны.%s\n", dim(), reset());
+        bool opened = false;
+        for (int attempt = 0; attempt < (env ? 1 : 3) && !opened; ++attempt) {
+            std::string phrase;
+            if (env)
+                phrase = env;
+            else if (!platform::consoleReadSecret("Пароль: ", phrase))
+                return 1;
+            Key32 derived{};
+            if (!passwordKey(normalizePassword(phrase), meta.salt.data(), meta.salt.size(),
+                             derived)) {
+                std::fprintf(stderr, "Не удалось вывести ключ из пароля: не хватило памяти?\n");
+                return 1;
+            }
+            if (opens(derived)) {
+                link.key = derived;
+                link.hasKey = true;
+                opened = true;
+            } else {
+                std::fprintf(stderr, "Пароль не подошёл.\n");
+            }
+        }
+        if (!opened)
+            return 1;
+    } else {
+        if (!link.hasKey) {
+            std::fprintf(stderr,
+                         "В ссылке нет ключа — части после решётки.\n"
+                         "%sБез неё расшифровать нечего: сервер ключа не знает и знать не может.\n"
+                         "Попросите прислать ссылку целиком или ключ отдельно (--key).%s\n",
+                         dim(), reset());
+            return 1;
+        }
+        if (!opens(link.key)) {
+            std::fprintf(stderr,
+                         "Манифест не расшифровался.\n"
+                         "%sЛибо ключ в ссылке не тот, либо сервер описал том иначе, чем\n"
+                         "отправитель: размер тома входит в проверяемые данные.%s\n", dim(),
+                         reset());
+            return 1;
+        }
     }
+    const TransferKeys keys = TransferKeys::derive(link.key);
 
     Manifest manifest;
     if (!Manifest::fromJson(std::string(manifestPlain.begin(), manifestPlain.end()), manifest,
@@ -493,8 +543,12 @@ int runGet(const Options &options)
     std::printf("%s│%s %s\n", dim(), reset(),
                 field("чанки", count(plan.chunkCount) + " по " + bytes(plan.chunkSize)).c_str());
     std::printf("%s│%s %s\n", dim(), reset(),
-                field("состояние", meta.state == "active" ? "отправитель на связи"
-                                                          : "отправителя нет").c_str());
+                field("состояние", meta.state == "active"      ? "отправитель на связи"
+                                   : meta.state == "delegated" ? "отправитель ушёл, раздают скачавшие"
+                                                               : "отправителя нет").c_str());
+    if (meta.requireApproval)
+        std::printf("%s│%s %s\n", dim(), reset(),
+                    field("вход", "отправитель спросит, пустить ли вас").c_str());
     if (meta.usesLeft >= 0)
         std::printf("%s│%s %s\n", dim(), reset(),
                     field("использований", std::to_string(meta.usesLeft)).c_str());
@@ -662,7 +716,8 @@ int runGet(const Options &options)
     // неизвестное сообщение для сервера это bad_message, а не «пропущу».
     bool serverSpeaksRanges = false;
     const int64_t helloDeadline = nowMs() + 20000;
-    while (!accepted && nowMs() < helloDeadline && !stopRequested()) {
+    bool waitingApproval = false;
+    while (!accepted && (waitingApproval || nowMs() < helloDeadline) && !stopRequested()) {
         if (!ws.pump(200)) {
             // Сервер отвечает ошибкой и сразу закрывает сокет: причина уже
             // лежит в очереди, надо только её оттуда достать.
@@ -687,6 +742,13 @@ int runGet(const Options &options)
             if (type == "hello_ok") {
                 accepted = true;
                 serverSpeaksRanges = announces(v, "ranges");
+            } else if (type == "approval_pending") {
+                // Ключ принят, решает человек. Сколько он будет думать —
+                // неизвестно, поэтому срок ожидания снимается: уйти можно
+                // Ctrl-C, и использование при этом не списано.
+                waitingApproval = true;
+                std::printf("%sЖдём, пока отправитель пустит. Ctrl-C — уйти.%s\n", dim(), reset());
+                std::fflush(stdout);
             } else if (type == "error") {
                 std::fprintf(stderr, "%s\n", explainError(v["reason"].toString()).c_str());
                 volume.close();
@@ -748,6 +810,7 @@ int runGet(const Options &options)
     // Разбивка по источникам — со слов сервера: сам получатель её знать
     // не может. Пустая строка — сервер ещё не сказал или не умеет.
     std::string sourceLine;
+    std::string stateLine;
 
     uint64_t received = have;
 
@@ -788,6 +851,14 @@ int runGet(const Options &options)
                 if (type == "error") {
                     failed = true;
                     failure = explainError(v["reason"].toString());
+                } else if (type == "state") {
+                    // Отправитель ушёл, разрешив раздаче жить без него:
+                    // дальше том едет от тех, кто скачал его целиком.
+                    const std::string st = v["state"].toString();
+                    if (st == "delegated")
+                        stateLine = "отправитель ушёл — раздают те, кто скачал том целиком";
+                    else if (st == "active")
+                        stateLine.clear();
                 } else if (type == "stats") {
                     const json::Value &src = v["src"];
                     const double w = src["window"].toDouble(0);
@@ -1090,6 +1161,8 @@ int runGet(const Options &options)
         };
         if (!sourceLine.empty())
             panelLines.push_back(std::string(dim()) + sourceLine + reset());
+        if (!stateLine.empty())
+            panelLines.push_back(std::string(dim()) + stateLine + reset());
         panel.update(panelLines);
     }
 
@@ -1187,7 +1260,8 @@ int runGet(const Options &options)
 
     LivePanel seedPanel;
     const int64_t seedStartedMs = nowMs();
-    while (!stopRequested() && ws.isOpen()) {
+    std::string closedWhy;
+    while (!stopRequested() && ws.isOpen() && closedWhy.empty()) {
         if (!ws.pump(200))
             break;
 
@@ -1198,6 +1272,12 @@ int runGet(const Options &options)
             json::Value v;
             if (!json::Value::parse(m.data, v) || !v.isObject())
                 continue;
+            // Раздачу закрыли — срок, использования, отзыв: отдавать
+            // больше некому, и сидеть на сокете незачем.
+            if (v["type"].toString() == "error") {
+                closedWhy = explainError(v["reason"].toString());
+                break;
+            }
             if (v["type"].toString() != "serve")
                 continue;
             const json::Value &ranges = v["ranges"];
@@ -1236,6 +1316,8 @@ int runGet(const Options &options)
     seedPanel.finish();
     seed.close();
     ws.closeGracefully();
+    if (!closedWhy.empty())
+        std::printf("%sРаздача закрылась: %s%s\n", dim(), closedWhy.c_str(), reset());
     std::printf("%sСидирование остановлено. Отдано %s.%s\n", dim(),
                 bytes(servedChunks * uint64_t(plan.chunkSize)).c_str(), reset());
     return 0;

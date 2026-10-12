@@ -133,6 +133,15 @@ void TransferRegistry::sweep()
 {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
 
+    // Раздача без отправителя может остаться и без единого участника — и
+    // тогда её не тронет ни один сокет. Сторож у неё свой; закрываясь, она
+    // сама уходит из реестра, поэтому идём по копии.
+    const QList<TransferSession *> all = m_byId.values();
+    for (TransferSession *s : all) {
+        if (s->state() == TransferSession::State::Delegated)
+            s->checkDelegated(now);
+    }
+
     QList<TransferSession *> doomed;
     for (TransferSession *s : m_byId) {
         if (now >= s->expiresAtMs())

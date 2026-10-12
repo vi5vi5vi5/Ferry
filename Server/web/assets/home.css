@@ -164,6 +164,35 @@
    показывать QR незачем — она больше не открывается. */
 .sx-ended #sx-linkbox .btns, .sx-ended .sx-qr, .sx-ended #sx-split { display: none; }
 .sx-ended .sx-link { opacity: .45; text-decoration: line-through; text-decoration-thickness: 1px; }
+.sx-ended #sx-pw, .sx-ended #sx-owner, .sx-ended .sx-pol, .sx-ended .sx-knocks { display: none; }
+
+/* ---- доступ: подтверждение, работа без отправителя, пароль ---- */
+.acc { gap: 12px; }
+.pw-new { display: flex; flex-direction: column; gap: 8px; padding-left: 58px; }
+.pw-new input { width: 100%; min-width: 0; padding: 9px 12px; border: 1px solid var(--line-200); border-radius: 4px;
+    background: var(--surface-200); color: var(--ink-100); font: var(--text-mono-m); }
+.pw-new input:focus { border-color: var(--ink-200); outline: none; }
+.pw-new input[aria-invalid="true"] { border-color: var(--warn); }
+.load-body .own-left { border-color: var(--seed); background: var(--seed-muted); }
+
+/* Очередь у двери — над всем остальным: пока на неё не ответили,
+   человек на той стороне просто ждёт. */
+.sx-knocks { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px;
+    border: 1px solid var(--signal); border-radius: 4px; background: var(--signal-muted); }
+.sx-knocks-h { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sx-knocks-h b { font: var(--text-body-strong); color: var(--ink-100); }
+.sx-knock { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center;
+    padding: 8px 0; border-top: 1px solid rgba(255, 106, 31, 0.25); }
+.sx-knock .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sx-knock .who b { font: var(--text-body-strong); color: var(--ink-100); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sx-knock .who span { font: var(--text-mono-s); color: var(--ink-300); }
+.sx-pol { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.sx-owner .btns { margin-top: 2px; }
+#sx-pw code { word-break: normal; overflow-wrap: anywhere; }
+
+/* Управление без тома: ни потока, ни трюма — только получатели и условия. */
+.sx-manage .sx-flowsec, .sx-manage .sx-holdsec, .sx-manage .sx-port-rate, .sx-manage .fx-flow { display: none; }
+.sx-manage .sx-two { grid-template-columns: minmax(0, 1fr); }
 
 @media (max-width: 900px) {
     .fx-hero-grid { grid-template-columns: minmax(0, 1fr) !important; padding: 28px 20px 300px !important; gap: 36px !important; }
@@ -188,6 +217,9 @@
     .sx-link-row { flex-direction: column; align-items: flex-start; }
     .sx-link { font-size: 17px; line-height: 24px; }
     .sx-trow { grid-template-columns: 84px minmax(0, 1fr) 52px 108px; gap: 10px; }
+    .pw-new { padding-left: 0; }
+    .sx-knock { grid-template-columns: minmax(0, 1fr) auto; }
+    .sx-knock .who { grid-column: 1 / -1; }
 }
 @media (max-width: 520px) {
     .fx-moon { display: none; }

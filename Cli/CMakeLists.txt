@@ -17,8 +17,26 @@ add_library(ferry-qrcodegen STATIC third_party/qrcodegen/qrcodegen.c)
 target_include_directories(ferry-qrcodegen PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qrcodegen)
 
+# Argon2id для режима «пароль вместо ключа»: эталонная реализация авторов
+# (CC0 / Apache 2.0), переносимая ветка без SSE и без потоков — пароль
+# выводится один раз, и лишняя секунда дешевле второй сборки под ARM.
+add_library(ferry-argon2 STATIC
+    third_party/argon2/src/argon2.c
+    third_party/argon2/src/core.c
+    third_party/argon2/src/encoding.c
+    third_party/argon2/src/ref.c
+    third_party/argon2/src/blake2/blake2b.c)
+target_include_directories(ferry-argon2 PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/argon2/include)
+target_compile_definitions(ferry-argon2 PRIVATE ARGON2_NO_THREADS)
+# Чужой код не правим, а его предупреждения в нашей сборке — шум.
+if(NOT MSVC)
+    target_compile_options(ferry-argon2 PRIVATE -w)
+endif()
+
 add_executable(ferry
     main.cpp
+    Password.h    Password.cpp
     ChunkPump.h   ChunkPump.cpp
     Hasher.h      Hasher.cpp
     Tree.h        Tree.cpp
@@ -48,7 +66,7 @@ add_executable(ferry
 # #include "core/Chunker.h" — одинаково для своего кода и для общего.
 target_include_directories(ferry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
-target_link_libraries(ferry PRIVATE ferry-core ferry-crypto ferry-qrcodegen)
+target_link_libraries(ferry PRIVATE ferry-core ferry-crypto ferry-qrcodegen ferry-argon2)
 
 # Windows: сокеты (ws2_32), разбор командной строки в UTF-16 (shell32),
 # системное хранилище сертификатов (crypt32) — без него статический

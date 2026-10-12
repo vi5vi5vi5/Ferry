@@ -197,5 +197,9 @@ void HttpApi::handleHealth(const Responder &respond)
     o[QStringLiteral("keeps_identifiers")] = Log::keepsIdentifiers();
     // На диске у Ferry нет ничего, и это тоже часть обещания (§10).
     o[QStringLiteral("stores_on_disk")] = false;
+    // Что релей умеет — тот же список, что в offer_ok. Главной странице он
+    // нужен раньше, чем заведена раздача: ручки, которых релей не поймёт,
+    // ей лучше не показывать вовсе.
+    o[QStringLiteral("features")] = TransferServer::serverFeatures();
     respond(ApiResponse::json(200, o));
 }

@@ -161,6 +161,8 @@ a:hover { color: #ffb07a; }
 .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 44px; }
 .caption { margin: 0; font: var(--text-caption); color: var(--ink-300); max-width: 80ch; }
 .caption--2 { color: var(--ink-200); }
+.caption--warn { color: var(--warn-text); }
+.pw-form { display: flex; flex-direction: column; gap: 14px; margin-top: 18px; }
 
 /* ---- сводка чисел ---- */
 .g4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--line-100);

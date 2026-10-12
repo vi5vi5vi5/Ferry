@@ -121,13 +121,7 @@ void TransferServer::sendError(ClientSession *session, const char *reason, bool 
 
 QJsonArray TransferServer::serverFeatures()
 {
-    QJsonArray f;
-    f.append(QStringLiteral("ranges"));
-    f.append(QStringLiteral("backfill"));
-    // Хеши на лету: отправитель может начать раздачу, не посчитав том
-    // целиком, а получатель — принимать список сегментами.
-    f.append(QString::fromLatin1(ferry::kFeatureStreamHashes));
-    return f;
+    return TransferSession::serverFeatures();
 }
 
 void TransferServer::onText(ClientSession *session, const QString &text)
@@ -154,6 +148,11 @@ void TransferServer::onText(ClientSession *session, const QString &text)
         handleBadChunk(session, msg);
     } else if (type == QLatin1String("hashes") || type == QLatin1String("hashes_done")) {
         handleHashes(session, msg, type == QLatin1String("hashes_done"));
+    } else if (type == QLatin1String("approve") || type == QLatin1String("policy")
+               || type == QLatin1String("revoke")) {
+        handleOwner(session, msg, type);
+    } else if (type == QLatin1String("resume_owner")) {
+        handleResumeOwner(session, msg);
     } else if (type == QLatin1String("bye")) {
         session->close();
     } else if (type == QLatin1String("subscribe_live")) {
@@ -261,41 +260,80 @@ void TransferServer::handleHello(ClientSession *session, const QJsonObject &msg)
 
     // Что у получателя уже есть и что он умеет — разбирает сама раздача:
     // там же лежит количество чанков, без которого диапазоны не проверить.
+    // Она же отвечает hello_ok — сразу или когда владелец скажет «да».
     QString errorCode;
-    if (!transfer->attachReceiver(session, msg, QDateTime::currentMSecsSinceEpoch(),
-                                  &errorCode)) {
+    const auto admission = transfer->attachReceiver(
+        session, msg, QDateTime::currentMSecsSinceEpoch(), &errorCode);
+    if (admission == TransferSession::Admission::Rejected) {
         sendError(session, errorCode.toLatin1().constData());
         return;
     }
 
-    QJsonObject ok;
-    ok[QStringLiteral("type")] = QStringLiteral("hello_ok");
-    ok[QStringLiteral("receiver_id")] = int(session->receiverId());
-    ok[QStringLiteral("state")] = QStringLiteral("active");
-    // Честный ответ на вопрос «будут ли меня просить отдавать»: да, если
-    // клиент сам объявил, что умеет.
-    ok[QStringLiteral("can_seed")] = TransferSession::canSeed(session);
-    ok[QStringLiteral("chunks")] = double(transfer->chunkCount());
-    ok[QStringLiteral("uses_left")] = transfer->usesLeft();
-    ok[QStringLiteral("from_chunk")] = double(session->cursor());
-    ok[QStringLiteral("features")] = serverFeatures();
-    session->sendJson(ok);
-
-    // Сегменты хешей — сразу за hello_ok и раньше первого фрейма (он
-    // уйдёт только из pump ниже). Порядок в сокете и есть порядок
-    // прихода, так что хеш каждого чанка окажется у получателя раньше
-    // самого чанка.
-    transfer->sendHashesSoFar(session);
-
-    if (TransferSession *t = session->transfer()) {
-        if (t->sender())
-            t->sender()->sendJson(t->peersJson());
-    }
-
-    qInfo().noquote() << QStringLiteral("получатель подключился к %1")
+    qInfo().noquote() << QStringLiteral("получатель %1 к %2")
+                             .arg(admission == TransferSession::Admission::Pending
+                                      ? QStringLiteral("ждёт разрешения")
+                                      : QStringLiteral("подключился"))
                              .arg(Log::keepsIdentifiers() ? QString::fromLatin1(id)
                                                           : QStringLiteral("<id скрыт>"));
+}
 
+void TransferServer::handleOwner(ClientSession *session, const QJsonObject &msg,
+                                 const QString &type)
+{
+    // Распоряжаться раздачей может только её владелец — тот, кто прислал
+    // offer, или тот, кто вернулся с owner_token. Сид — канал, а не
+    // полномочие (§5).
+    TransferSession *transfer = session->transfer();
+    if (!transfer || transfer->owner() != session) {
+        sendError(session, ferry::err::kBadMessage);
+        return;
+    }
+    if (type == QLatin1String("revoke")) {
+        transfer->revoke();
+        return;
+    }
+    const bool ok = type == QLatin1String("approve")
+                        ? transfer->onApprove(msg)
+                        : transfer->onPolicy(msg, QDateTime::currentMSecsSinceEpoch());
+    if (!ok)
+        sendError(session, ferry::err::kBadMessage);
+}
+
+void TransferServer::handleResumeOwner(ClientSession *session, const QJsonObject &msg)
+{
+    if (session->role() != ClientSession::Role::Unknown) {
+        sendError(session, ferry::err::kBadMessage);
+        return;
+    }
+    const QByteArray id = msg.value(QStringLiteral("id")).toString().toLatin1();
+    TransferSession *transfer = m_registry->find(id);
+    if (!transfer) {
+        sendError(session, ferry::err::kNotFound);
+        return;
+    }
+    const QByteArray token = fromB64(msg.value(QStringLiteral("owner_token")).toString());
+    if (!constantTimeEquals(token, transfer->ownerToken())) {
+        sendError(session, ferry::err::kOwnerConflict);
+        return;
+    }
+    QString errorCode;
+    const bool serve = msg.value(QStringLiteral("serve")).toBool(false);
+    if (!transfer->resumeOwner(session, serve, &errorCode)) {
+        sendError(session, errorCode.toLatin1().constData());
+        return;
+    }
+
+    QJsonObject ok = transfer->stateJson(QDateTime::currentMSecsSinceEpoch());
+    ok[QStringLiteral("type")] = QStringLiteral("resume_ok");
+    ok[QStringLiteral("chunks")] = double(transfer->chunkCount());
+    ok[QStringLiteral("features")] = serverFeatures();
+    session->sendJson(ok);
+    session->sendJson(transfer->peersJson());
+
+    qInfo().noquote() << QStringLiteral("владелец вернулся к %1%2")
+                             .arg(Log::keepsIdentifiers() ? QString::fromLatin1(id)
+                                                          : QStringLiteral("<id скрыт>"))
+                             .arg(serve ? QStringLiteral(" с томом") : QString());
     transfer->pump();
 }
 
@@ -335,8 +373,8 @@ void TransferServer::handleHave(ClientSession *session, const QJsonObject &msg)
     // Сводку отправителю пересобираем сразу: именно have теперь несёт
     // прогресс получателя, и ждать секунду до тика значило бы показывать
     // отправителю вчерашний день.
-    if (transfer->sender())
-        transfer->sender()->sendJson(transfer->peersJson());
+    if (transfer->owner())
+        transfer->owner()->sendJson(transfer->peersJson());
 }
 
 void TransferServer::handleRequest(ClientSession *session, const QJsonObject &msg)
@@ -401,7 +439,7 @@ void TransferServer::onBinary(ClientSession *session, const QByteArray &data)
         return;
     }
 
-    if (session->role() != ClientSession::Role::Sender) {
+    if (session->role() != ClientSession::Role::Sender || transfer->sender() != session) {
         sendError(session, ferry::err::kBadMessage);
         return;
     }
@@ -446,8 +484,8 @@ void TransferServer::onTick()
         seen.insert(t);
         t->tick(now);
         t->pump();
-        if (t->sender())
-            t->sender()->sendJson(t->peersJson());
+        if (t->owner())
+            t->owner()->sendJson(t->peersJson());
 
     }
 }
