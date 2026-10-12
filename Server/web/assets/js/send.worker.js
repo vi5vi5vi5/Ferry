@@ -35,6 +35,12 @@ const SEGMENT_MAX = 8192;
 const OFFER_TIMEOUT_MS = 20000;
 const PROGRESS_MS = 250;
 const MAP_CELLS = 120;
+// Возврат после обрыва: релей ждёт отправителя тридцать секунд, пробуем
+// двадцать пять — чтобы не прийти к уже закрытой раздаче.
+const RESUME_WINDOW_MS = 25000;
+// Релей шлёт сводку раз в секунду. Тишина дольше — соединение мертво,
+// даже если браузер об этом ещё не знает: так выглядит смена сети.
+const SILENCE_MS = 15000;
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 
@@ -66,6 +72,17 @@ class RateMeter {
         if (this.last && performance.now() - this.last > 2000)
             return 0;
         return this.value;
+    }
+}
+
+function parse(data) {
+    if (typeof data !== 'string')
+        return null;
+    try {
+        const v = JSON.parse(data);
+        return v && typeof v === 'object' ? v : null;
+    } catch {
+        return null;
     }
 }
 
@@ -127,6 +144,19 @@ class Sender {
         this.chain = Promise.resolve();
 
         this.ws = null;
+        // Сокет меняется при возврате после обрыва. Всё, что начато для
+        // прежнего (чанк в шифровании, сегмент хешей), в новый не уходит:
+        // релей его не просил, и чанк за дыркой окна он счёл бы поломкой.
+        this.epoch = 0;
+        this.reconnecting = false;
+        this.lastHeard = 0;
+        // Какие сегменты хешей уже уходили: с какого чанка и сколько. После
+        // обрыва сегмент с того же места обязан уйти ТОЧНО таким же — nonce
+        // зависит только от начала, и другой длины под ним GCM не прощает.
+        this.segments = new Map();
+        // Чего хочет человек: если раздача без нас ушла на сиды и
+        // подтверждение снялось, вернувшись, включаем его снова.
+        this.wantApproval = !!this.policy.requireApproval;
         this.accepted = false;
         this.stopping = false;
         this.finished = false;
@@ -154,6 +184,8 @@ class Sender {
         let created = await this.create();
         this.stream = created.features.includes('stream_hashes');
         this.features = created.features;
+        // Релей подождёт нас после обрыва — и мы обещаем вернуться.
+        this.canResume = created.features.includes('resume');
         // Что релей не умеет — говорим до ссылки, а не после первого
         // получателя: старый релей молча пропустил бы условия мимо ушей.
         const p = this.policy;
@@ -225,6 +257,8 @@ class Sender {
             offer.policy.leave_open = true;
             offer.policy.on_owner_leave = 'freeze';
         }
+        if (this.canResume)
+            offer.features = ['resume'];
 
         await this.connect(offer);
     }
@@ -250,38 +284,23 @@ class Sender {
             }, OFFER_TIMEOUT_MS);
             ws.onopen = () => ws.send(JSON.stringify(offer));
             ws.onmessage = (ev) => {
-                if (typeof ev.data !== 'string')
+                const v = parse(ev.data);
+                if (!v)
                     return;
-                let v;
-                try {
-                    v = JSON.parse(ev.data);
-                } catch {
-                    return;
-                }
+                this.lastHeard = performance.now();
                 if (v.type === 'offer_ok' && !this.accepted) {
                     this.accepted = true;
                     clearTimeout(timeout);
                     this.onAccepted();
                     resolve();
-                } else if (v.type === 'need') {
-                    this.rememberNeed(v);
-                    this.kick();
-                } else if (v.type === 'peers') {
-                    post({ ev: 'peers', receivers: Array.isArray(v.receivers) ? v.receivers : [] });
-                } else if (v.type === 'approval_request') {
-                    post({ ev: 'knock', receiver: v.receiver, name: typeof v.name === 'string' ? v.name : '' });
-                } else if (v.type === 'approval_cancel') {
-                    post({ ev: 'knockGone', receiver: v.receiver });
-                } else if (v.type === 'state') {
-                    post({ ev: 'state', state: v });
-                } else if (v.type === 'error') {
+                } else if (v.type === 'error' && !this.accepted) {
                     this.lastError = String(v.reason || 'unknown');
-                    if (!this.accepted) {
-                        clearTimeout(timeout);
-                        reject(new SendError(this.lastError));
-                    } else {
-                        this.fail(this.lastError);
-                    }
+                    clearTimeout(timeout);
+                    reject(new SendError(this.lastError));
+                } else {
+                    // need может прийти одной пачкой с offer_ok и раньше
+                    // него — его нельзя терять.
+                    this.onMessage(v);
                 }
             };
             ws.onclose = () => {
@@ -290,10 +309,176 @@ class Sender {
                     reject(new SendError(this.lastError || 'network', 'не удалось подключиться к релею'));
                     return;
                 }
-                if (!this.stopping)
-                    this.fail(this.lastError || 'network');
+                this.onClosed(ws);
             };
         });
+    }
+
+    onMessage(v) {
+        switch (v.type) {
+        case 'need':
+            this.rememberNeed(v);
+            this.kick();
+            break;
+        case 'peers':
+            post({ ev: 'peers', receivers: Array.isArray(v.receivers) ? v.receivers : [] });
+            break;
+        case 'approval_request':
+            post({ ev: 'knock', receiver: v.receiver, name: typeof v.name === 'string' ? v.name : '' });
+            break;
+        case 'approval_cancel':
+            post({ ev: 'knockGone', receiver: v.receiver });
+            break;
+        case 'state':
+            post({ ev: 'state', state: v });
+            break;
+        case 'error':
+            this.lastError = String(v.reason || 'unknown');
+            this.fail(this.lastError);
+            break;
+        default:
+            break;
+        }
+    }
+
+    // Сокет закрылся. Релей объяснил почему — это конец; молча — обрыв, и
+    // релей, обещавший подождать, ждёт нас назад.
+    onClosed(ws) {
+        if (ws !== this.ws || this.stopping || this.finished)
+            return;
+        if (this.lastError || !this.canResume)
+            return this.fail(this.lastError || 'network');
+        this.lost();
+    }
+
+    lost() {
+        if (this.reconnecting || this.finished)
+            return;
+        this.reconnecting = true;
+        const old = this.ws;
+        if (old) {
+            old.onmessage = null;
+            old.onclose = null;
+            try {
+                old.close();
+            } catch {
+                // уже закрыт
+            }
+        }
+        this.resume().catch((e) => this.fail(e.code || 'network', e.message));
+    }
+
+    async resume() {
+        const deadline = performance.now() + RESUME_WINDOW_MS;
+        let delay = 500;
+        let attempt = 0;
+        while (!this.finished && performance.now() < deadline) {
+            attempt++;
+            post({ ev: 'link', state: 'lost', attempt });
+            const r = await this.tryResume();
+            if (this.finished)
+                return;
+            if (r === 'ok')
+                return;
+            if (r !== 'retry')
+                return this.fail(r);
+            const pause = Math.min(delay, Math.max(0, deadline - performance.now()));
+            await new Promise((ok) => setTimeout(ok, pause));
+            delay = Math.min(delay * 2, 4000);
+        }
+        if (!this.finished)
+            this.fail('network', 'связь с релеем пропала и не вернулась');
+    }
+
+    // Одна попытка: 'ok' — вернулись, 'retry' — не достучались, иначе код
+    // отказа релея (раздачи уже нет, её закрыли…) — тогда пробовать незачем.
+    tryResume() {
+        return new Promise((resolve) => {
+            let ws;
+            try {
+                ws = new WebSocket(wsUrl(this.origin));
+            } catch {
+                resolve('retry');
+                return;
+            }
+            ws.binaryType = 'arraybuffer';
+            let done = false;
+            const finish = (r) => {
+                if (done)
+                    return;
+                done = true;
+                clearTimeout(timer);
+                resolve(r);
+            };
+            const timer = setTimeout(() => {
+                ws.onmessage = null;
+                ws.onclose = null;
+                try {
+                    ws.close();
+                } catch {
+                    // уже закрыт
+                }
+                finish('retry');
+            }, 10000);
+            ws.onopen = () => ws.send(JSON.stringify({
+                type: 'resume_owner', id: this.created.id, owner_token: this.created.ownerToken,
+                serve: true, features: ['resume'],
+            }));
+            ws.onmessage = (ev) => {
+                const v = parse(ev.data);
+                if (!v)
+                    return;
+                if (done) {
+                    if (ws === this.ws) {
+                        this.lastHeard = performance.now();
+                        this.onMessage(v);
+                    }
+                    return;
+                }
+                if (this.finished) {
+                    // Пока возвращались, человек закрыл раздачу.
+                    ws.onclose = null;
+                    ws.close(1000);
+                    finish('retry');
+                } else if (v.type === 'resume_ok') {
+                    this.adopt(ws, v);
+                    finish('ok');
+                } else if (v.type === 'error') {
+                    finish(String(v.reason || 'unknown'));
+                }
+            };
+            ws.onclose = () => {
+                if (!done)
+                    finish('retry');
+                else
+                    this.onClosed(ws);
+            };
+        });
+    }
+
+    // Вернулись. Что было в пути, пропало вместе с прежним сокетом: очереди
+    // начинаются заново, релей попросит недостающее сам. Хеши — с того
+    // места, докуда он их принял.
+    adopt(ws, v) {
+        this.epoch++;
+        this.ws = ws;
+        this.reconnecting = false;
+        this.lastHeard = performance.now();
+        this.live = new ChunkSet(this.count);
+        this.backfill = new ChunkSet(this.count);
+        this.liveHint = 0;
+        this.backfillHint = 0;
+        if (this.stream) {
+            const upto = Number.isInteger(v.hashed_upto) ? v.hashed_upto : 0;
+            this.announced = Math.min(this.announced, upto);
+            this.hashesDoneSent = !!v.hashes_complete;
+        }
+        if (this.wantApproval && !v.require_approval)
+            ws.send(JSON.stringify({ type: 'policy', require_approval: true }));
+        post({ ev: 'resumed' });
+        post({ ev: 'state', state: v });
+        post({ ev: 'link', state: 'ok' });
+        this.kick();
     }
 
     onAccepted() {
@@ -310,7 +495,17 @@ class Sender {
             stream: this.stream,
             policy: this.policy,
         });
-        this.timer = setInterval(() => this.kick(), 50);
+        this.lastHeard = performance.now();
+        this.timer = setInterval(() => this.tick(), 50);
+        this.kick();
+    }
+
+    tick() {
+        if (this.canResume && !this.reconnecting && !this.finished
+            && performance.now() - this.lastHeard > SILENCE_MS) {
+            this.lost();
+            return;
+        }
         this.kick();
     }
 
@@ -378,6 +573,7 @@ class Sender {
     async announce() {
         if (!this.stream || this.hashesDoneSent)
             return;
+        const epoch = this.epoch;
         const ready = this.hashed;
         if (ready > this.announced) {
             const nextLive = this.live.empty ? this.count : this.live.firstPresent(0);
@@ -387,10 +583,11 @@ class Sender {
             if (starving || batch || stale || ready === this.count) {
                 while (this.announced < ready) {
                     const from = this.announced;
-                    const n = Math.min(ready - from, SEGMENT_MAX);
+                    const n = this.segments.get(from) ?? Math.min(ready - from, SEGMENT_MAX);
+                    this.segments.set(from, n);
                     const sealed = await this.sealMeta(hashSegmentLabel(from),
                         this.hashes.subarray(from * 32, (from + n) * 32));
-                    if (this.finished)
+                    if (this.finished || epoch !== this.epoch || this.reconnecting)
                         return;
                     this.ws.send(JSON.stringify({ type: 'hashes', from, count: n, data: b64urlEncode(sealed) }));
                     this.announced = from + n;
@@ -404,7 +601,9 @@ class Sender {
         if (this.hashingDone && this.announced === this.count && !this.hashesDoneSent) {
             this.hashesDoneSent = true;
             const { manifest, list } = await this.finalMeta();
-            if (this.finished)
+            // Сокет сменился, пока шифровали: вернувшись, релей сказал, есть
+            // ли у него итог, и hashesDoneSent уже переставлен по его слову.
+            if (this.finished || epoch !== this.epoch || this.reconnecting)
                 return;
             this.ws.send(JSON.stringify({
                 type: 'hashes_done', manifest: b64urlEncode(manifest), hash_list: b64urlEncode(list),
@@ -471,6 +670,7 @@ class Sender {
             if (index < 0)
                 return;
             const len = this.sizeOf(index);
+            const epoch = this.epoch;
             this.inflight++;
             this.inflightBytes += len;
             const ready = this.frame(index);
@@ -480,6 +680,10 @@ class Sender {
                 this.inflight--;
                 this.inflightBytes -= len;
                 if (this.finished)
+                    return;
+                // Просили у прежнего сокета — пропало вместе с ним. Релей
+                // попросит снова; отдать сейчас значило бы чанк за дыркой.
+                if (epoch !== this.epoch || this.reconnecting)
                     return;
                 this.ws.send(buf);
                 this.meter.add(len);
@@ -496,7 +700,7 @@ class Sender {
     }
 
     kick() {
-        if (this.finished || !this.accepted)
+        if (this.finished || !this.accepted || this.reconnecting)
             return;
         if (this.pumping) {
             this.again = true;
@@ -571,7 +775,9 @@ class Sender {
     // Команда владельца: пустить, поменять условия. Релей отвечает state
     // или approval_cancel — их и покажет страница.
     owner(msg) {
-        if (!this.finished && this.accepted && this.ws && this.ws.readyState === 1)
+        if (msg && msg.type === 'policy' && typeof msg.require_approval === 'boolean')
+            this.wantApproval = msg.require_approval;
+        if (!this.finished && this.accepted && !this.reconnecting && this.ws && this.ws.readyState === 1)
             this.ws.send(JSON.stringify(msg));
     }
 
@@ -584,6 +790,11 @@ class Sender {
         if (revoke && this.accepted && this.ws && this.ws.readyState === 1
             && (this.features || []).includes('policy'))
             this.ws.send(JSON.stringify({ type: 'revoke' }));
+        // Уходим сами: иначе релей примет закрытие за обрыв и станет ждать
+        // нас назад. Страница ещё и шлёт маяк по HTTP — bye за мегабайтами
+        // чанков в сокете может опоздать.
+        if (!revoke && this.accepted && this.ws && this.ws.readyState === 1)
+            this.ws.send(JSON.stringify({ type: 'bye' }));
         this.stopping = true;
         this.finished = true;
         clearInterval(this.timer);

@@ -66,6 +66,29 @@ bool HttpApi::route(const HttpRequest &req, const Responder &respond)
         return true;
     }
 
+    // Отправитель закрывает вкладку (/leave) или закрывает доступ
+    // (/revoke). Сокет у него в воркере и забит чанками: bye или revoke
+    // встали бы в очередь за мегабайтами, а воркер закроют раньше, чем они
+    // дойдут. sendBeacon по HTTP успевает. Без этого релей принял бы уход
+    // за обрыв и ещё тридцать секунд ждал бы отправителя назад — а после
+    // «Закрыть доступ» всё это время пускал бы новых получателей.
+    const bool leave = req.path.endsWith(QLatin1String("/leave"));
+    const bool revoke = req.path.endsWith(QLatin1String("/revoke"));
+    if (req.path.startsWith(QLatin1String("/api/transfers/")) && (leave || revoke)) {
+        if (req.method != "POST") {
+            respond(ApiResponse::error(405, "method_not_allowed"));
+            return true;
+        }
+        QString rest = req.path.mid(QStringLiteral("/api/transfers/").size());
+        rest.chop(leave ? QStringLiteral("/leave").size() : QStringLiteral("/revoke").size());
+        if (!ferry::isValidTransferId(rest.toStdString())) {
+            respond(ApiResponse::error(404, ferry::err::kNotFound));
+            return true;
+        }
+        handleOwnerBeacon(rest.toLatin1(), req.body, revoke, respond);
+        return true;
+    }
+
     if (req.path.startsWith(QLatin1String("/api/transfers/"))) {
         if (req.method != "GET") {
             respond(ApiResponse::error(405, "method_not_allowed"));
@@ -154,6 +177,31 @@ void HttpApi::handleMeta(const QByteArray &id, bool streamClient, const Responde
     }
     respond(ApiResponse::json(
         200, session->metaJson(QDateTime::currentMSecsSinceEpoch(), streamClient)));
+}
+
+void HttpApi::handleOwnerBeacon(const QByteArray &id, const QByteArray &body, bool revoke,
+                                const Responder &respond)
+{
+    TransferSession *session = m_registry->find(id);
+    if (!session || !session->hasOffer()) {
+        respond(ApiResponse::error(404, ferry::err::kNotFound));
+        return;
+    }
+    // Тело — owner_token, как его выдал POST /api/transfers. Уйти за
+    // отправителя или закрыть раздачу может только тот, у кого его токен.
+    const QByteArray token = QByteArray::fromBase64(
+        body.trimmed(), QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+    if (!TransferServer::constantTimeEquals(token, session->ownerToken())) {
+        respond(ApiResponse::error(403, ferry::err::kOwnerConflict));
+        return;
+    }
+    if (revoke)
+        session->revoke();
+    else
+        session->senderLeaving();
+    QJsonObject o;
+    o[QStringLiteral("ok")] = true;
+    respond(ApiResponse::json(200, o));
 }
 
 void HttpApi::handleChallenge(const QByteArray &id, const Responder &respond)

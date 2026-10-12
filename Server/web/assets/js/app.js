@@ -11,7 +11,7 @@ import { parseLink, fetchMeta } from './api.js';
 import { cryptoAvailable } from './crypto.js';
 import { openVolume } from './volume.js';
 import { summarize } from './manifest.js';
-import { readSavedState, sweepOld, MEMORY_LIMIT } from './store.js';
+import { readSavedState, sweepOld, MEMORY_LIMIT, streamTarget } from './store.js';
 import { b64urlDecode } from './b64.js';
 import { normalize as normalizePassword, deriveKey } from './password.js';
 import { NB, grp, comma, plural, unitOf, inUnit, unitName, size, dur, pct, files, dirs, chunks, copy } from './ui.js';
@@ -139,6 +139,10 @@ const S = {
     savedHave: 0,
     opfs: false,
     fsa: typeof window.showDirectoryPicker === 'function',
+    // Поток прямо в «Загрузки» через Service Worker: последний выход, когда
+    // ни хранилищу, ни памяти том не по силам.
+    stream: 'serviceWorker' in navigator && window.isSecureContext,
+    dl: null,           // загрузка потоком: { rid, port, target, opened, frame }
     free: null,
     dest: 'download',
     dir: null,
@@ -230,7 +234,7 @@ const ERRORS = {
     },
     uses_exhausted: {
         pic: 'fog', tone: 'danger', tag: 'лимит исчерпан', title: 'Лимит использований исчерпан',
-        text: 'У ссылки было ограниченное число использований, и они кончились. Каждое подключение тратит одно — и первое, и переподключение после обрыва.',
+        text: 'У ссылки было ограниченное число использований, и они кончились. Каждый новый получатель тратит одно; возврат после обрыва из той же вкладки — нет.',
         exit: 'Попросите отправителя выдать новую ссылку', act: ['request'],
     },
     expired: {
@@ -318,6 +322,16 @@ const ERRORS = {
         text: 'Для приёма нужны модульные воркеры и WebCrypto. Они есть в свежих Chrome, Edge, Firefox и Safari.',
         exit: 'Обновите браузер или заберите том из терминала', act: [], cli: true,
     },
+    no_stream: {
+        pic: 'storm', tone: 'warn', tag: 'загрузка не началась', title: 'Браузер не начал загрузку',
+        text: 'Том должен был идти потоком прямо в «Загрузки» через фоновый обработчик страницы (Service Worker), но браузер его не запустил или не дал ему отдать файл. Так бывает в приватном окне или при строгих настройках браузера.',
+        exit: 'Освободите место на диске — тогда приём пойдёт через хранилище браузера — или заберите том из терминала', act: ['retry'], cli: true,
+    },
+    stream_broken: {
+        pic: 'storm', tone: 'warn', tag: 'загрузка оборвалась', title: 'Загрузка в браузере оборвалась',
+        text: 'Том шёл потоком прямо в «Загрузки», и браузер перестал его принимать: загрузку отменили или поставили на паузу, либо браузер остановил фоновый обработчик. Недописанный файл браузер пометил неудавшимся — за целый он себя не выдаст. Продолжить с места обрыва нельзя: загрузку браузер дописывает только подряд.',
+        exit: 'Попробуйте снова — приём пойдёт с начала тома, если сервер ещё держит его начало, — или заберите том из терминала', act: ['retry'], cli: true,
+    },
     owner_conflict: {
         pic: 'storm', tone: 'danger', tag: 'конфликт', title: 'Раздача занята',
         text: 'Сервер считает, что этой раздачей уже распоряжается кто-то другой.',
@@ -350,6 +364,14 @@ function showError(code, message = '') {
     }
     setText('errTitle', title);
     let text = e.text;
+    // Поток в «Загрузки» берёт том только живой волной, с начала и подряд:
+    // у тех, кто скачал целиком, он взять не умеет.
+    if (S.store === 'stream' && code === 'no_source')
+        text = 'Приём потоком в «Загрузки» идёт только с начала тома, подряд, а раздача уже ушла дальше окна сервера. '
+            + 'Взять начало у тех, кто скачал том целиком, этот режим не умеет: для этого нужно место в хранилище браузера.';
+    else if (S.store === 'stream' && code === 'sender_gone')
+        text = 'Отправитель отключился. Приём потоком в «Загрузки» берёт том только у отправителя, подряд, — '
+            + 'продолжить без него нельзя. Недописанную загрузку браузер пометил неудавшейся.';
     if (code === 'no_space' && S.meta) {
         text = `Тому нужно ${size(S.meta.total)}, а браузер может отдать под хранилище `
             + `${S.free === null ? 'меньше' : size(S.free)}.`;
@@ -593,6 +615,10 @@ const ALL_ROWS = 2000;
 
 function pickStore() {
     const total = S.meta.total;
+    // Проверка пути C без тома больше хранилища: в консоли страницы
+    // localStorage.setItem('ferry.store', 'stream') — и обратно removeItem.
+    if (remember('ferry.store') === 'stream' && S.stream && S.meta.state === 'active' && !S.saved)
+        return 'stream';
     // Недокачка уже заняла своё место, второй раз его не попросит.
     const need = (S.saved ? 0 : total) + 16 * 1024 * 1024;
     if (S.opfs && (S.free === null || S.free >= need))
@@ -603,6 +629,9 @@ function pickStore() {
         return 'fsa';
     if (total <= MEMORY_LIMIT)
         return 'memory';
+    // Поток идёт только живой волной: без отправителя её нет.
+    if (S.stream && S.meta.state === 'active')
+        return 'stream';
     return null;
 }
 
@@ -669,7 +698,7 @@ function renderPreview() {
         meta.requireApproval ? ['доступ', 'с подтверждения отправителя', 'v--warn'] : null,
     ]);
     setText('termsNote', uses >= 0
-        ? 'Каждое подключение тратит одно использование — и первое, и переподключение после обрыва. Открыть эту страницу ничего не стоит: использование списывается, только когда начинается приём.'
+        ? 'Использование списывается один раз, когда начинается приём. Открыть эту страницу ничего не стоит, а возврат после обрыва из этой же вкладки, даже после перезагрузки, его не тратит.'
         : 'Открыть эту страницу ничего не стоит: сервер считает подключения, только когда начинается приём.');
 
     renderPreviewList();
@@ -730,14 +759,15 @@ function renderDest() {
         opfs: 'через хранилище браузера',
         fsa: 'прямо в папку',
         memory: 'в памяти вкладки',
+        stream: 'потоком прямо в «Загрузки»',
     };
+    const seeds = store && store !== 'fsa' && store !== 'stream';
     kvs($('#pv-space'), [
-        ['нужно места', size(total)],
+        ['нужно места', store === 'stream' ? `${size(streamTarget(m).size)} на диске, в «Загрузках»` : size(total)],
         ['браузер может занять', S.free === null ? 'не говорит' : size(S.free),
             S.free === null ? '' : S.free >= total ? 'v--ok' : 'v--warn'],
         ['как пишем', store ? label[store] : 'места не хватает', store ? '' : 'v--warn'],
-        ['раздавать другим', store && store !== 'fsa' ? 'можно, пока вкладка открыта' : 'нет',
-            store && store !== 'fsa' ? 'v--seed' : ''],
+        ['раздавать другим', seeds ? 'можно, пока вкладка открыта' : 'нет', seeds ? 'v--seed' : ''],
         ['докачка после перезагрузки', store === 'opfs' ? 'да, с того же чанка' : 'нет', store === 'opfs' ? 'v--ok' : 'v--warn'],
     ]);
 
@@ -753,6 +783,13 @@ function renderDest() {
             + 'Цена: раздавать другим не получится, а после перезагрузки страницы приём начнётся заново.';
     } else if (store === 'memory') {
         note = 'Том небольшой и соберётся в памяти вкладки. Перезагрузка страницы начнёт приём заново.';
+    } else if (store === 'stream') {
+        note = 'Хранилищу браузера места под том не хватает, поэтому он пойдёт потоком прямо в «Загрузки»: '
+            + 'загрузка начнётся вместе с приёмом и закончится вместе с ним'
+            + (tree ? ', а папка приедет одним ZIP без сжатия, собранным на лету. ' : '. ')
+            + 'Цена: приём идёт одной волной, с начала тома и подряд, — если раздача уже ушла дальше окна сервера, '
+            + 'взять начало будет неоткуда. Раздавать другим и продолжить после перезагрузки не получится, '
+            + 'а загрузку нельзя ставить на паузу.';
     } else {
         note = `Места не хватает: тому нужно ${size(total)}, а браузер может занять `
             + `${S.free === null ? 'меньше' : size(S.free)}. Освободите место на диске`
@@ -787,7 +824,7 @@ async function onGo() {
             return showError(S.opfs ? 'no_space' : 'no_store');
         if (S.store === 'opfs' && !complete && navigator.storage && navigator.storage.persist)
             navigator.storage.persist().catch(() => {});
-        startWorker();
+        await startWorker();
     } catch (e) {
         showError('io', String(e && e.message || e));
     } finally {
@@ -795,9 +832,11 @@ async function onGo() {
     }
 }
 
-function startWorker() {
+async function startWorker() {
     if (S.worker)
         S.worker.terminate();
+    S.worker = null;
+    dropDownload();
     S.alive = false;
     S.snap = null;
     S.phase = 'connecting';
@@ -805,6 +844,23 @@ function startWorker() {
     S.summary = null;
     S.exported = null;
     S.exportBlob = null;
+
+    // Поток в «Загрузки»: Service Worker поднимаем сейчас, чтобы отказ
+    // браузера был виден до подключения к раздаче, а не после. Порт к
+    // нему уходит воркеру приёма; второй конец страница отдаст SW, когда
+    // воркеру будет что писать (open-download).
+    let port = null;
+    if (S.store === 'stream') {
+        try {
+            await swWorker();
+        } catch (e) {
+            return showError('no_stream', String(e && e.message || e));
+        }
+        const ch = new MessageChannel();
+        S.dl = { rid: newRid(), port: ch.port2, target: streamTarget(S.vol.manifest), opened: false, frame: null };
+        port = ch.port1;
+    }
+
     const w = new Worker('/assets/js/receive.worker.js', { type: 'module' });
     S.worker = w;
     w.onmessage = (e) => {
@@ -827,10 +883,141 @@ function startWorker() {
         meta: S.meta,
         store: S.store,
         dir: S.store === 'fsa' ? S.dir : null,
-    });
+        port,
+        rejoin: rejoinToken(),
+    }, port ? [port] : []);
     initRx();
     show('rx');
     startTicking();
+}
+
+// Токен возврата: релей выдаёт его в hello_ok, и с ним вернувшийся после
+// обрыва или перезагрузки вкладки получатель не тратит использование
+// ссылки. Живёт в sessionStorage — то есть ровно в этой вкладке.
+function rejoinKey() {
+    return `ferry.rejoin.${S.link.id}`;
+}
+
+function rejoinToken() {
+    try {
+        return sessionStorage.getItem(rejoinKey()) || '';
+    } catch {
+        return '';
+    }
+}
+
+function keepRejoin(token) {
+    try {
+        sessionStorage.setItem(rejoinKey(), token);
+    } catch {
+        // без хранилища токен живёт в воркере до закрытия вкладки
+    }
+}
+
+// ---------------------------------------------------------------- поток в «Загрузки»
+
+const SW_URL = '/assets/js/dl.sw.js';
+const SW_SCOPE = '/assets/js/dl/';
+const PING_MS = 10000;
+let swReg = null;
+let pinger = null;
+
+function newRid() {
+    const b = crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+// Активный SW загрузок. Страница сама вне его области, поэтому
+// navigator.serviceWorker.ready её не касается: активации ждём сами.
+async function swWorker() {
+    if (!swReg)
+        swReg = await navigator.serviceWorker.register(SW_URL, { scope: SW_SCOPE, type: 'classic' });
+    if (swReg.active)
+        return swReg.active;
+    const sw = swReg.installing || swReg.waiting;
+    if (!sw)
+        throw new Error('Service Worker не установился');
+    await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('Service Worker не активировался')), 10000);
+        const check = () => {
+            if (sw.state === 'activated') {
+                clearTimeout(t);
+                resolve();
+            } else if (sw.state === 'redundant') {
+                clearTimeout(t);
+                reject(new Error('браузер отбросил Service Worker'));
+            }
+        };
+        sw.addEventListener('statechange', check);
+        check();
+    });
+    return swReg.active || sw;
+}
+
+// Воркеру есть что писать: отдаём SW второй конец порта и открываем
+// загрузку в невидимом iframe — ответ с Content-Disposition браузер
+// уводит в «Загрузки», а страница остаётся на месте.
+async function openDownload() {
+    const dl = S.dl;
+    if (!dl || dl.opened)
+        return;
+    dl.opened = true;
+    try {
+        const sw = await swWorker();
+        const ack = new MessageChannel();
+        const registered = new Promise((resolve, reject) => {
+            const t = setTimeout(() => reject(new Error('Service Worker не ответил')), 10000);
+            ack.port1.onmessage = () => {
+                clearTimeout(t);
+                resolve();
+            };
+        });
+        sw.postMessage({ type: 'register', rid: dl.rid, name: dl.target.file, size: dl.target.size,
+            port: dl.port, ack: ack.port2 }, [dl.port, ack.port2]);
+        await registered;
+        ack.port1.close();
+        if (dl !== S.dl)
+            return;
+        const frame = document.createElement('iframe');
+        frame.hidden = true;
+        frame.title = 'загрузка';
+        frame.src = `${SW_SCOPE}${dl.rid}/${encodeURIComponent(dl.target.file)}`;
+        document.body.append(frame);
+        dl.frame = frame;
+        // SW живёт, пока ему пишут: без этого браузер счёл бы его
+        // простаивающим посреди долгой загрузки и остановил.
+        stopPings();
+        pinger = setInterval(() => {
+            if (swReg && swReg.active)
+                swReg.active.postMessage({ type: 'ping' });
+        }, PING_MS);
+    } catch (e) {
+        if (dl !== S.dl)
+            return;
+        if (S.worker)
+            S.worker.postMessage({ cmd: 'stop' });
+        showError('no_stream', String(e && e.message || e));
+    }
+}
+
+function stopPings() {
+    clearInterval(pinger);
+    pinger = null;
+}
+
+// Прежняя загрузка больше не нужна (начинаем заново или уходим): SW её
+// обрывает — воркера, который сделал бы это сам, может уже не быть.
+function dropDownload() {
+    stopPings();
+    const dl = S.dl;
+    if (!dl)
+        return;
+    S.dl = null;
+    const done = S.exported && S.exported.how === 'stream';
+    if (!done && swReg && swReg.active)
+        swReg.active.postMessage({ type: 'abort', rid: dl.rid });
+    if (dl.frame)
+        setTimeout(() => dl.frame.remove(), 1000);
 }
 
 function restartFromScratch(btn) {
@@ -860,13 +1047,24 @@ function onWorker(ev) {
         break;
     case 'done':
         S.summary = ev.summary;
+        if (S.store === 'stream' && S.dl) {
+            S.exported = { how: 'stream', name: S.dl.target.file };
+            stopPings();
+        }
         enterDone();
+        break;
+    case 'open-download':
+        openDownload();
+        break;
+    case 'rejoin':
+        keepRejoin(ev.token);
         break;
     case 'error':
         if (ev.where === 'export')
             return exportFailed(ev);
         if (S.view === 'done')
             return;
+        stopPings();
         showError(ev.code, ev.message);
         break;
     case 'seed':
@@ -1022,24 +1220,30 @@ function renderRxPlace() {
     const tree = m.kind === 'tree';
     const dirName = S.dir ? S.dir.name : '';
     const store = S.store;
+    const stream = store === 'stream';
     kvs($('#rx-place'), [
         ['хранилище', store === 'opfs' ? 'хранилище браузера (OPFS)'
-            : store === 'fsa' ? `прямо в папку «${dirName}»` : 'память вкладки'],
+            : store === 'fsa' ? `прямо в папку «${dirName}»`
+                : stream ? 'нигде: потоком в «Загрузки»' : 'память вкладки'],
         store === 'fsa' && S.target ? ['имя в папке', S.target] : null,
         ['после приёма', store === 'fsa' ? 'уже на месте'
-            : S.dest === 'dir' && S.dir ? `в папку «${dirName}»`
-                : `в «Загрузки» · ${tree ? m.name + '.zip' : m.name}`],
-        ['режим записи', store === 'fsa' ? 'по местам · без раздачи' : 'по местам · можно раздавать',
-            store === 'fsa' ? '' : 'v--seed'],
+            : stream ? `уже в «Загрузках» · ${S.dl ? S.dl.target.file : m.name}`
+                : S.dest === 'dir' && S.dir ? `в папку «${dirName}»`
+                    : `в «Загрузки» · ${tree ? m.name + '.zip' : m.name}`],
+        ['режим записи', store === 'fsa' ? 'по местам · без раздачи'
+            : stream ? 'подряд, одной волной · без раздачи' : 'по местам · можно раздавать',
+        store === 'fsa' || stream ? '' : 'v--seed'],
         ['докачка после перезагрузки', store === 'opfs' ? 'да' : 'нет', store === 'opfs' ? 'v--ok' : 'v--warn'],
         ['шифрование', 'AES-256-GCM · ключ из ссылки'],
     ]);
     setText('placeNote', store === 'fsa'
         ? 'Браузер не даёт читать файлы, пока они пишутся, поэтому раздавать другим во время такого приёма не получится.'
-        : 'Пока вкладка открыта, принятые чанки уходят тем, кто подключился позже, — так работает вторая волна.');
+        : stream ? 'Загрузку браузер дописывает только подряд, поэтому том идёт одной волной, с начала до конца, и раздавать его другим не получится.'
+            : 'Пока вкладка открыта, принятые чанки уходят тем, кто подключился позже, — так работает вторая волна.');
     setText('rxFoot', store === 'opfs'
         ? 'Не закрывайте вкладку: приём идёт в ней. Каждый чанк проверяется BLAKE3 сразу по приходу, а принятое лежит в хранилище браузера — после обрыва или перезагрузки продолжим с того же места.'
-        : 'Не закрывайте вкладку: приём идёт в ней. Каждый чанк проверяется BLAKE3 сразу по приходу. После обрыва связи продолжим с того же места, но перезагрузка страницы начнёт приём заново.');
+        : stream ? 'Не закрывайте вкладку и не ставьте загрузку на паузу: приём идёт в этой вкладке, а загрузка в браузере растёт вместе с полосой. Каждый чанк проверяется BLAKE3 до того, как попасть в файл.'
+            : 'Не закрывайте вкладку: приём идёт в ней. Каждый чанк проверяется BLAKE3 сразу по приходу. После обрыва связи продолжим с того же места, но перезагрузка страницы начнёт приём заново.');
 }
 
 function renderRx() {
@@ -1095,7 +1299,8 @@ function renderRx() {
             : 'Приём остановлен.');
         setText('bannerSub', S.store === 'opfs'
             ? `Продолжим с того же места, пока раздача жива. ${uses >= 0 ? usesNote : ''}`
-            : 'Принятое было только в этой вкладке — продолжить можно лишь с начала.');
+            : S.store === 'stream' ? 'Загрузка в браузере оборвана — продолжить можно лишь с начала, новой загрузкой.'
+                : 'Принятое было только в этой вкладке — продолжить можно лишь с начала.');
         bbtn.hidden = true;
         $('#rx-stop').hidden = true;
         $('#rx-resume').hidden = false;
@@ -1115,7 +1320,8 @@ function renderRx() {
     } else {
         const two = s && s.join > 0 && s.join < s.count;
         setText('rxStamp', 'приём идёт');
-        setText('rxStampSub', s && s.relayState === 'delegated' ? 'без отправителя'
+        setText('rxStampSub', s && s.senderAway ? 'отправитель переподключается'
+            : s && s.relayState === 'delegated' ? 'без отправителя'
             : two ? 'две волны' : 'одна волна');
     }
 
@@ -1266,7 +1472,7 @@ function enterDone() {
     renderPlace();
     renderSeed();
     // Папку выбрали заранее — перекладываем сами, не дожидаясь кнопки.
-    if (S.store !== 'fsa' && S.dest === 'dir' && S.dir && !S.exported)
+    if (S.store !== 'fsa' && S.store !== 'stream' && S.dest === 'dir' && S.dir && !S.exported)
         startExport('dir', S.dir);
 }
 
@@ -1281,6 +1487,11 @@ function renderPlace() {
     go.disabled = S.exporting;
     alt.disabled = S.exporting;
 
+    if (S.store === 'stream') {
+        setText('placeName', 'Загрузки браузера');
+        setText('placeSub', `${S.exported ? S.exported.name : m.name} — записан потоком, ищите в «Загрузках»`);
+        return;
+    }
     if (S.closed) {
         setText('placeName', S.exported && S.exported.how === 'dir'
             ? `${S.dir ? S.dir.name + ' / ' : ''}${S.exported.name}` : 'копия в браузере удалена');
@@ -1410,7 +1621,7 @@ function renderSeed() {
         return;
     const sw = $('#seed-sw');
     const role = $('#seed-role');
-    const canRead = S.seed.canRead !== false && S.store !== 'fsa';
+    const canRead = S.seed.canRead !== false && S.store !== 'fsa' && S.store !== 'stream';
     const on = !!S.seed.on && !S.closed;
     // Переключатель показывает желание человека, строка под ним — правду:
     // подключение для раздачи занимает пару секунд.
@@ -1427,11 +1638,13 @@ function renderSeed() {
         : S.closed ? 'закрыто' : want ? 'подключаюсь к раздаче…' : refused || 'готово · не раздаёт');
     setText('seedText', canRead
         ? 'Те, кто подключится позже, возьмут начало тома у вас — отправителю не придётся отдавать его второй раз.'
-        : 'При записи прямо в папку раздавать нечем: браузер не даёт читать файлы, пока они пишутся.');
+        : S.store === 'stream'
+            ? 'Том ушёл прямо в «Загрузки», копии в браузере нет — раздавать нечем.'
+            : 'При записи прямо в папку раздавать нечем: браузер не даёт читать файлы, пока они пишутся.');
 }
 
 function onClose() {
-    const notSaved = S.store !== 'fsa' && !S.exported;
+    const notSaved = S.store !== 'fsa' && S.store !== 'stream' && !S.exported;
     if (notSaved && !confirm('Том ещё не выгружен из браузера — после «Закрыть» его не останется. Закрыть всё равно?'))
         return;
     if (S.exported && S.exported.how === 'download'
@@ -1455,7 +1668,8 @@ function closedDone() {
     }
     renderPlace();
     renderSeed();
-    setText('doneFoot', 'Копия из хранилища браузера удалена. Вкладку можно закрыть.');
+    setText('doneFoot', S.store === 'opfs' ? 'Копия из хранилища браузера удалена. Вкладку можно закрыть.'
+        : 'Вкладку можно закрыть.');
     $('#done-close').textContent = 'Закрыто';
 }
 
@@ -1505,7 +1719,9 @@ function wire() {
     });
     $('#rx-stop').addEventListener('click', () => {
         if (S.store !== 'opfs'
-            && !confirm('Принятое лежит только в этой вкладке и пропадёт — продолжить можно будет лишь с начала. Остановить?'))
+            && !confirm(S.store === 'stream'
+                ? 'Загрузка в браузере оборвётся, и продолжить можно будет лишь с начала. Остановить?'
+                : 'Принятое лежит только в этой вкладке и пропадёт — продолжить можно будет лишь с начала. Остановить?'))
             return;
         if (S.worker)
             S.worker.postMessage({ cmd: 'stop' });
@@ -1578,6 +1794,9 @@ function wire() {
         if (S.worker)
             S.worker.postMessage({ cmd: 'online' });
     });
+    // Уходим посреди потока в «Загрузки» — загрузку оборвать, а не
+    // оставить висеть «идущей».
+    window.addEventListener('pagehide', () => dropDownload());
     // Закрыть вкладку посреди приёма — потерять его (или хотя бы
     // соединение). Спрашиваем, как спрашивает любой загрузчик.
     window.addEventListener('beforeunload', (e) => {

@@ -39,6 +39,11 @@ const HELLO_TIMEOUT_MS = 20000;
 // а сообщение приходит только целиком. Ложная тревога здесь стоит дорого —
 // каждое новое подключение списывает использование ссылки.
 const STALL_MS = 120000;
+// Приём потоком в «Загрузки»: если браузер забирает загрузку медленнее,
+// чем идёт сеть, чанки копятся здесь — WebSocket притормозить нельзя.
+// Больше этого — значит загрузка стоит, и копить дальше значит уронить
+// вкладку по памяти.
+const SEQ_BACKLOG_MAX = 256 * 1024 * 1024;
 
 // Отказы релея, после которых переподключаться бессмысленно: ответ не
 // изменится, сколько ни проси. Остальное (обрыв, занятый сервер) —
@@ -47,6 +52,7 @@ export const FINAL_ERRORS = new Set([
     'need_key', 'transfer_not_found', 'uses_exhausted', 'expired', 'sender_gone',
     'no_source', 'chunk_mismatch', 'owner_conflict', 'bad_message', 'approval_denied', 'revoked',
     'bad_hashes', 'bad_key', 'bad_manifest', 'bad_meta', 'no_space', 'busy', 'io',
+    'no_stream', 'stream_broken',
 ]);
 
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -90,7 +96,7 @@ class RateMeter {
 }
 
 export class Receiver {
-    constructor({ origin, id, key, meta, store, WebSocketImpl, onEvent, name = '' }) {
+    constructor({ origin, id, key, meta, store, WebSocketImpl, onEvent, name = '', rejoin = '' }) {
         this.origin = origin;
         this.id = id;
         this.key = key;
@@ -99,6 +105,9 @@ export class Receiver {
         this.WS = WebSocketImpl || WebSocket;
         this.emit = onEvent || (() => {});
         this.name = name;
+        // Токен возврата из прошлого hello_ok: с ним переподключение после
+        // обрыва не тратит использование ссылки и не ждёт владельца снова.
+        this.rejoin = rejoin;
 
         this.phase = 'idle';
         this.ws = null;
@@ -115,6 +124,10 @@ export class Receiver {
         this.served = 0;
         this.servedBytes = 0;
         this.serving = false;
+        // Хранилище пишет только по порядку (поток в «Загрузки»): одна
+        // волна с начала до конца, без диапазонов и без раздачи.
+        this.sequential = !!store.sequential;
+        this.backlog = 0;
     }
 
     // ---- запуск ----
@@ -156,9 +169,10 @@ export class Receiver {
 
         this.timer = setInterval(() => this.housekeeping(), 100);
         // Том уже целиком здесь и сверен (страницу перезагрузили после
-        // приёма) — к серверу не идём: каждое подключение списывает
-        // использование ссылки, а одноразовая ссылка после приёма отказала
-        // бы и том, лежащий на диске, показался бы потерянным.
+        // приёма) — к серверу не идём: новое подключение без токена
+        // возврата списывает использование ссылки, а одноразовая ссылка
+        // после приёма отказала бы и том, лежащий на диске, показался бы
+        // потерянным.
         if (this.have.full && this.hashesComplete) {
             await this.checkDone();
             return;
@@ -240,7 +254,10 @@ export class Receiver {
         this.lastMessageAt = now();
 
         ws.onopen = () => {
-            const features = ['ranges', 'stream_hashes'];
+            // Поток в «Загрузки» объявляет себя клиентом M1: без диапазонов
+            // сервер шлёт строго по порядку, а дырку закрыть ему нечем —
+            // в загрузку можно только дописывать.
+            const features = this.sequential ? ['stream_hashes'] : ['ranges', 'stream_hashes'];
             // Отдавать умеем, только если можем читать принятое. Объявить
             // backfill без этого — значит позвать сервер просить у нас то,
             // чего мы не отдадим, и повесить чужой догон.
@@ -257,6 +274,8 @@ export class Receiver {
             };
             if (this.name)
                 hello.name = this.name;
+            if (this.rejoin)
+                hello.rejoin = this.rejoin;
             if (wantStream)
                 hello.hashes = 'stream';
             ws.send(JSON.stringify(hello));
@@ -344,6 +363,14 @@ export class Receiver {
         } else {
             const u8 = new Uint8Array(data);
             const item = { bin: true, u8 };
+            if (this.sequential) {
+                this.backlog += u8.length;
+                if (this.backlog > SEQ_BACKLOG_MAX && !this.fatal) {
+                    this.fail('stream_broken', 'Браузер не успевает забирать загрузку: она стоит, а данные идут. '
+                        + 'Похоже, её поставили на паузу.');
+                    return;
+                }
+            }
             if (u8.length < HEADER) {
                 item.broken = 'сервер прислал обрезанный фрейм';
             } else if (u8[0] !== OP_CHUNK) {
@@ -372,6 +399,8 @@ export class Receiver {
     async pump() {
         while (this.queue.length && !this.fatal) {
             const item = this.queue.shift();
+            if (item.bin && this.sequential)
+                this.backlog -= item.u8.length;
             try {
                 if (item.bin)
                     await this.onChunk(item);
@@ -410,13 +439,22 @@ export class Receiver {
                 this.relayState = v.state;
             if (typeof v.uses_left === 'number')
                 this.usesLeft = v.uses_left;
+            // Связь с отправителем пропала, релей ждёт его назад: полоса
+            // стоит не просто так.
+            this.senderAway = !!v.sender_away;
             this.emitProgress();
             break;
         case 'hello_ok':
             this.accepted = true;
             this.waitingApproval = false;
+            // Токен одноразовый: релей выдаёт новый на каждый вход.
+            if (typeof v.rejoin === 'string' && v.rejoin) {
+                this.rejoin = v.rejoin;
+                this.emit({ ev: 'rejoin', token: v.rejoin });
+            }
             if (typeof v.state === 'string')
                 this.relayState = v.state;
+            this.senderAway = !!v.sender_away;
             this.reconnectAttempt = 0;
             this.ranges = Array.isArray(v.features) && v.features.includes('ranges');
             this.canSeed = !!v.can_seed;
@@ -547,6 +585,10 @@ export class Receiver {
         if (index >= this.hashed || !this.hashMatches(index, plain))
             return this.reject(index, 'hash');
         this.badInARow = 0;
+        // В поток — только следующий по порядку. Принятое здесь всегда
+        // непрерывное начало, поэтому «следующий» — это просто их число.
+        if (this.sequential && index !== this.have.have)
+            return this.fail('bad_message', 'сервер прислал чанк не по порядку, а поток в «Загрузки» пишется только подряд');
 
         await this.store.write(this.plan.offsetOf(index), plain);
         this.have.set(index);
@@ -580,6 +622,10 @@ export class Receiver {
     // Несошедшийся чанк больше не валит передачу: его выбрасывают, сервер
     // узнаёт, что источник солгал, и просит тот же индекс у другого.
     reject(index, why) {
+        // Без диапазонов попросить этот чанк у другого источника нельзя,
+        // а пропустить — значит испортить загрузку.
+        if (this.sequential)
+            return this.fail('chunk_mismatch');
         this.badInARow++;
         if (this.ranges)
             this.send({ type: 'bad_chunk', index, reason: why });
@@ -740,7 +786,13 @@ export class Receiver {
         // сидировать нас после этого не позвали бы никогда.
         this.sentHave = -1;
         this.reportHave();
-        await this.store.flush();
+        try {
+            await this.store.flush();
+        } catch (e) {
+            // Поток в «Загрузки» не дописался: файл там неполный.
+            this.finished = false;
+            return this.fail(e.code || 'io', String(e && e.message || e));
+        }
         await this.saveState();
         this.finishedAt = Date.now();
         this.setPhase('done');
@@ -824,6 +876,9 @@ export class Receiver {
         this.fatal = { code, message: message || '' };
         clearTimeout(this.reconnectTimer);
         this.closeSocket();
+        // Загрузку в браузере — оборвать, чтобы она не легла неполной.
+        if (this.store.abort)
+            this.store.abort(code).catch(() => {});
         this.setPhase('failed');
         this.saveState().catch(() => {});
         this.emitProgress();
@@ -916,6 +971,7 @@ export class Receiver {
             reconnectAt: this.phase === 'reconnecting' ? this.reconnectAt : 0,
             reconnectAttempt: this.reconnectAttempt,
             relayState: this.relayState || '',
+            senderAway: !!this.senderAway,
             served: this.served,
             servedBytes: this.servedBytes,
             seeding: this.seeding && this.store.canRead && !!this.ws,

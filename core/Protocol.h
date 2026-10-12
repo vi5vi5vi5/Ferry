@@ -30,6 +30,7 @@ inline constexpr size_t kGcmTagSize = 16;
 inline constexpr size_t kMasterKeySize = 32;   // K из фрагмента ссылки
 inline constexpr size_t kTransferIdSize = 16;  // публичный id раздачи
 inline constexpr size_t kOwnerTokenSize = 32;  // токен владельца
+inline constexpr size_t kRejoinTokenSize = 16; // токен возврата получателя
 inline constexpr size_t kNoncePrefixSize = 4;  // случайный префикс nonce на раздачу
 inline constexpr size_t kChallengeSize = 16;   // challenge сервера
 inline constexpr size_t kVerifierSize = 32;    // V = HKDF(K, "ferry/v1/verifier")
@@ -89,6 +90,12 @@ inline constexpr const char *kFeatureStreamHashes = "stream_hashes";
 // если релей их не объявил.
 inline constexpr const char *kFeaturePolicy = "policy";
 inline constexpr const char *kFeaturePassword = "password";
+
+// Возврат отправителя после обрыва. Релей, объявивший resume, не закрывает
+// раздачу сразу, когда сокет отправителя пропал без bye, а ждёт его
+// kSenderGraceMs; отправитель, объявивший resume в offer, обещает за это
+// время вернуться с resume_owner serve:true — или сказать bye, уходя сам.
+inline constexpr const char *kFeatureResume = "resume";
 
 // Коды ошибок (§8). Строками, а не числами: они уходят в JSON и читаются
 // человеком в логе клиента.

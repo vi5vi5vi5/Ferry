@@ -90,7 +90,12 @@ void HttpFileServer::onReadyRead()
     // Смена протокола. Проверяем ДО того, как что-либо прочитали: сокет
     // целиком, вместе с непрочитанным рукопожатием, уходит к
     // QWebSocketServer, и он должен получить его нетронутым.
-    if (m_ws) {
+    //
+    // Только в начале запроса. Если парсер уже есть, заголовки прочитаны
+    // и это не апгрейд, а сейчас пришло тело — в нём нет ни заголовков, ни
+    // "\r\n\r\n", и проверка ниже ждала бы их вечно: POST, тело которого
+    // пришло отдельным пакетом (так шлёт sendBeacon), повисал без ответа.
+    if (m_ws && !m_parsers.contains(socket)) {
         const QByteArray peeked = socket->peek(4096);
         const bool headComplete = peeked.contains(QByteArrayLiteral("\r\n\r\n"));
         if (!headComplete && peeked.size() < 4096)
@@ -173,8 +178,11 @@ void HttpFileServer::serveFile(QTcpSocket *socket, const HttpRequest &req)
     if (rel.startsWith(QLatin1String("/t/")))
         rel = QStringLiteral("/t.html");
 
+    // Сравниваем с корнем вместе с разделителем: голый startsWith пропустил
+    // бы соседнюю папку с тем же началом имени (/x/web → /x/web-private).
     const QString full = QDir::cleanPath(m_root + rel);
-    if (!full.startsWith(m_root)) {
+    const QString base = m_root.endsWith(QLatin1Char('/')) ? m_root : m_root + QLatin1Char('/');
+    if (full != m_root && !full.startsWith(base)) {
         sendResponse(socket, 403, statusText(403), "text/plain; charset=utf-8", "403 Forbidden");
         return;
     }

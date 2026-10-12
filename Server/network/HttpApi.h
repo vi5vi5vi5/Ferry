@@ -53,6 +53,8 @@ private:
     void handleCreate(const HttpRequest &req, const Responder &respond);
     void handleMeta(const QByteArray &id, bool streamClient, const Responder &respond);
     void handleChallenge(const QByteArray &id, const Responder &respond);
+    void handleOwnerBeacon(const QByteArray &id, const QByteArray &body, bool revoke,
+                           const Responder &respond);
     void handleHealth(const Responder &respond);
 
     TransferRegistry *m_registry;      // не владеет

@@ -5,7 +5,7 @@
 // вовсе даёт только воркеру.
 
 import { Receiver } from './receiver.js';
-import { OpfsStore, MemoryStore, DirectStore, StoreError, freeName, exportToDirectory } from './store.js';
+import { OpfsStore, MemoryStore, DirectStore, StreamStore, StoreError, freeName, exportToDirectory } from './store.js';
 import { buildZip } from './zip.js';
 import { safeFileName } from './manifest.js';
 import { openVolume } from './volume.js';
@@ -31,17 +31,27 @@ async function makeStore(m) {
         post({ ev: 'target', name });
         return new DirectStore(m.dir, vol.manifest, vol.layout, name);
     }
+    if (m.store === 'stream') {
+        // Потоком в «Загрузки»: порт к Service Worker страница уже
+        // зарегистрировала, ZIP собирается по описи — её и открываем.
+        if (!m.port)
+            throw new StoreError('no_stream', 'страница не передала порт загрузки');
+        const vol = await openVolume(m.meta, m.key);
+        return new StreamStore(m.port, vol.manifest);
+    }
     throw new StoreError('io', 'неизвестное хранилище');
 }
 
 async function start(m) {
+    const store = await makeStore(m);
     rx = new Receiver({
         origin: m.origin,
         id: m.id,
         key: m.key,
         meta: m.meta,
-        store: await makeStore(m),
+        store,
         name: m.name || '',
+        rejoin: m.rejoin || '',
         onEvent: (ev) => {
             if (ev.ev === 'progress')
                 post(ev, [ev.cells.buffer, ev.bits.buffer]);
@@ -49,6 +59,13 @@ async function start(m) {
                 post(ev);
         },
     });
+    // Загрузка оборвалась, пока приём стоит (ждёт сети или разрешения):
+    // узнать об этом надо сразу, а не со следующим чанком.
+    if (store.kind === 'stream') {
+        const r = rx;
+        store.onError = (err) => r.fail(err.code, err.message);
+        store.onWant = () => post({ ev: 'open-download' });
+    }
     await rx.start();
 }
 

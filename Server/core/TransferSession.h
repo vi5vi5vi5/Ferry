@@ -117,7 +117,32 @@ public:
     // тогда раздача снова Active и живая волна продолжается с того места,
     // где остановилась. Прежнее соединение владельца, если оно ещё
     // числится, вытесняется: полуживой сокет не должен держать управление.
-    bool resumeOwner(ClientSession *session, bool serve, QString *errorCode);
+    //
+    // Вернувшийся с томом вытесняет и прежний сокет ОТПРАВИТЕЛЯ: после
+    // смены сети старое соединение мертво, но TCP узнает об этом через
+    // минуты, а токен владельца у нового тот же. resumes — обещает ли он
+    // вернуться снова, если оборвётся опять (kFeatureResume).
+    bool resumeOwner(ClientSession *session, bool serve, bool resumes, QString *errorCode);
+
+    // Вернувшемуся владельцу — те, кто ждёт его решения у двери. Зовётся
+    // после resume_ok: вопросы должны прийти уже в пульт, а не раньше него.
+    void sendPendingToOwner();
+
+    // Отправитель сказал, что уходит сам: bye по сокету или leave по HTTP
+    // из закрывающейся вкладки. Ждать его возвращения незачем; если связь
+    // уже пропала и раздача ждёт, ожидание кончается сейчас.
+    void senderLeaving(ClientSession *session = nullptr);
+
+    // Связь с отправителем пропала без bye, и раздача ждёт его возвращения
+    // (kSenderGraceMs). Состояние при этом Active: получатели остаются на
+    // местах, окно и пиры отдают то, что могут.
+    bool senderAway() const { return m_senderLostAtMs != 0; }
+    void checkSenderGrace(qint64 nowMs);
+
+    // Сколько хешей релей уже принял — с этого места вернувшийся
+    // отправитель продолжает сегменты.
+    quint64 hashedUpTo() const { return m_streamHashes ? m_hashedUpTo : m_chunkCount; }
+    bool hashesComplete() const { return m_hashesComplete; }
 
     // Сообщения владельца. false — bad_message.
     bool onApprove(const QJsonObject &msg);
@@ -199,12 +224,23 @@ signals:
 private:
     // Пустить получателя: последние проверки политики, курсор, списание
     // использования, hello_ok и всё, что идёт сразу за ним.
-    bool admit(ClientSession *receiver, QString *errorCode);
+    //
+    // rejoin — получатель вернулся по токену возврата: использование не
+    // списывается, лимит использований его не останавливает.
+    bool admit(ClientSession *receiver, QString *errorCode, const QByteArray &rejoin = {});
     void rejectPending(ClientSession *receiver, const char *reason);
     void admitAllPending();
 
     // Отправитель ушёл: делегировать или закрыть.
     void onSenderLeft();
+    // Можно ли жить без отправителя прямо сейчас (§5).
+    bool canDelegate() const;
+    // Связь пропала, ждём отправителя назад.
+    void senderLost(qint64 nowMs);
+    // Просьбы к отправителю, которые с его сокетом пропали: живую волну
+    // попросим заново от края окна, вторую — у того, у кого будет.
+    void forgetSenderRequests();
+    QJsonObject approvalRequestJson(const ClientSession *receiver) const;
 
     // Есть ли кому раздавать без отправителя: получатель со всем томом,
     // который умеет отдавать и на которого не жаловались.
@@ -256,6 +292,15 @@ private:
     // что человек успевает решить, что всё сломалось.
     static constexpr qint64 kStallMs = 5000;
 
+    // Самый медленный аплоад сида, под который рассчитан сторож второй
+    // волны: 64 КиБ/с, около полумегабита. Сид отдаёт своим каналом, и
+    // ждать чанк меньше, чем он идёт по такому каналу, — значит забывать
+    // просьбы, которые сид честно везёт (forgetStalledBackfill).
+    static constexpr qint64 kSlowUplinkBytesPerSec = 64 * 1024;
+    // Дальше сторож второй волны не растягивается: две минуты на чанк —
+    // это уже не медленный сид, а молчащий.
+    static constexpr qint64 kMaxBackfillStallMs = 120000;
+
     // Сколько чанков второй волны держим в пути одновременно.
     //
     // Потолок маленький нарочно. Чанк, пришедший по второй волне, не
@@ -276,6 +321,20 @@ private:
     // получатель после обрыва переподключается сам, и мгновенное закрытие
     // наказывало бы всех за секундную заминку у одного.
     static constexpr qint64 kSeedGraceMs = 30000;
+
+    // Сколько раздача ждёт отправителя, у которого пропала связь. Хватает
+    // на смену сети и на перезапуск вкладки; больше — получатели слишком
+    // долго смотрели бы на стоящую полосу, не зная, вернётся ли он.
+    static constexpr qint64 kSenderGraceMs = 30000;
+
+    // Сколько после обрыва ждём получателя, который не докачал и может
+    // вернуться по токену возврата, прежде чем закрыть раздачу без
+    // использований (checkDelegated). Вкладка переподключается через 1, 2,
+    // 4, 8, 15 и дальше каждые 30 секунд — минуты хватает на смену сети.
+    static constexpr qint64 kRejoinGraceMs = 60000;
+    // Сколько токенов возврата помним. Больше — забываем самые давние из
+    // ушедших: раздачу без лимита могут брать тысячи человек.
+    static constexpr int kMaxRejoinTokens = 1024;
 
     // Сколько человек может одновременно ждать решения владельца. Больше —
     // это уже не «друзья по ссылке», а кто-то, кто стучится без остановки.
@@ -321,6 +380,9 @@ private:
     bool m_freezeOnLeave = false;
     // С какого момента без отправителя нет ни одного сида. 0 — сид есть.
     qint64 m_noSeedSinceMs = 0;
+    bool m_senderResumes = false;     // отправитель объявил resume
+    bool m_senderLeaving = false;     // и сказал, что уходит сам
+    qint64 m_senderLostAtMs = 0;      // связь пропала; 0 — на связи
     qint64 m_createdAtMs = 0;
     qint64 m_expiresAtMs = 0;
 
@@ -347,6 +409,23 @@ private:
     ferry::ChunkSet m_backfillInFlight;
     QHash<quint64, ClientSession *> m_askedOf;   // nullptr — спросили отправителя
     qint64 m_backfillAskedMs = 0;
+    qint64 m_backfillArrivedMs = 0;   // когда пришёл последний чанк второй волны
+    qint64 m_backfillStallMs = kStallMs;   // срок сторожа второй волны, растёт сам
+    QHash<quint64, ClientSession *> m_forgotten;   // что сторож сбросил последним
+
+    // Токены возврата получателей (rejoin в hello_ok). Получатель, однажды
+    // пущенный, после обрыва возвращается с токеном и не тратит
+    // использование: одноразовая ссылка защищает от второго получателя, а
+    // не от плохой сети у первого. Токен одноразовый — при возврате
+    // выдаётся новый, старый гаснет.
+    struct Rejoin {
+        ClientSession *current = nullptr;   // кто сейчас на связи с ним
+        qint64 leftAtMs = 0;                // когда ушёл, если ушёл
+        bool complete = false;              // ушёл с томом целиком
+    };
+    QHash<QByteArray, Rejoin> m_rejoin;
+    QByteArray issueRejoin(ClientSession *receiver);
+    bool rejoinExpected(qint64 nowMs) const;
 
     // Кто прислал какой чанк — чтобы было кому записать жалобу из
     // bad_chunk. Живёт недолго: получатель проверяет чанк сразу, а держать

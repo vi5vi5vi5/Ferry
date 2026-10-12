@@ -190,6 +190,7 @@ class View {
         // метаданные. at — когда, чтобы срок тикал между обновлениями.
         this.cond = null;
         this.knocks = new Map();    // id → { name, at } — ждут у двери
+        this.linkLost = false;      // связь с релеем пропала, воркер возвращается
         this.ws = null;
         this.link = '';
         this.key = '';
@@ -353,11 +354,45 @@ class View {
             }
             this.end('closed');
         } else if (this.worker && running) {
+            if (revoke)
+                this.beacon('revoke');
+            else
+                this.leaveBeacon();
             this.worker.postMessage({ cmd: 'stop', revoke });
             this.end('closed');
         } else {
             this.phase = this.phase === 'preparing' ? 'closed' : this.phase;
             this.dispose();
+        }
+    }
+
+    // Сколько сейчас на связи тех, у кого весь том: на них раздача и
+    // останется без вкладки. Не finished — тот помнит всех, кто когда-либо
+    // докачал, в том числе ушедших и не оставшихся раздавать.
+    liveSeeds() {
+        return this.receivers.filter((r) => Number(r.progress) >= 1).length;
+    }
+
+    // Уходим сами — релей должен узнать это сразу, а не ждать нас тридцать
+    // секунд, как после обрыва. Маяком по HTTP, а не через сокет: сокет в
+    // воркере забит чанками, а при закрытии вкладки воркер не успеет и этого.
+    leaveBeacon() {
+        if ((this.features || []).includes('resume'))
+            this.beacon('leave');
+    }
+
+    // what — leave или revoke. «Закрыть доступ» идёт тем же путём: revoke в
+    // сокете встал бы за мегабайтами чанков, а воркер закроют раньше, и
+    // релей ещё тридцать секунд пускал бы новых. Сокет revoke тоже шлёт —
+    // для релея постарше, у которого /revoke нет.
+    beacon(what) {
+        if (this.manage || !this.id || !this.ownerToken)
+            return;
+        try {
+            navigator.sendBeacon(`${location.origin}/api/transfers/${encodeURIComponent(this.id)}/${what}`,
+                new Blob([this.ownerToken], { type: 'text/plain' }));
+        } catch {
+            // не вышло — остаётся сокет
         }
     }
 
@@ -422,6 +457,17 @@ class View {
             break;
         case 'state':
             this.applyState(m.state);
+            break;
+        case 'link':
+            // Связь с релеем пропала, воркер возвращается сам. Раздача на
+            // релее ждёт нас: получатели стоят, а не получают отказ.
+            this.linkLost = m.state === 'lost';
+            this.renderHead();
+            break;
+        case 'resumed':
+            // Вопросы у двери релей пришлёт заново, уже в новый сокет.
+            this.knocks.clear();
+            this.renderKnocks();
             break;
         case 'failed':
             this.end('failed', m.code, m.message);
@@ -601,6 +647,10 @@ class View {
         } else if (this.manage && this.phase === 'live') {
             a = 'без отправителя';
             b = this.receivers.length ? 'раздают скачавшие' : 'ждём получателей';
+        } else if (this.phase === 'live' && this.linkLost) {
+            stamp.classList.add('stamp--warn');
+            a = 'связь пропала';
+            b = 'возвращаемся, получатели ждут';
         } else if (this.phase === 'live') {
             a = 'раздача идёт';
             b = this.receivers.length ? 'принято к перевозке' : 'ждём получателей';
@@ -1019,7 +1069,7 @@ class View {
         });
         box.replaceChildren(...out);
 
-        const seeds = this.receivers.filter((r) => Number(r.progress) >= 1).length;
+        const seeds = this.liveSeeds();
         let note = 'Раздача идёт, пока открыта эта вкладка.';
         if (this.phase === 'closed' || this.phase === 'failed')
             note = this.manage ? 'Раздача закрыта или управляют ею не отсюда.' : 'Раздача закрыта. На релее от неё ничего не осталось.';
@@ -1083,9 +1133,17 @@ function wire() {
         if (V && V.cond && V.cond.usesLeft >= 0)
             V.owner({ type: 'policy', uses: V.cond.usesLeft + MORE_USES });
     });
+    // Ссылка владельца отличается от главной только фрагментом: браузер
+    // сменит адрес, но страницу не перезагрузит, а home.js на hashchange
+    // перезагружает лишь пустую главную. Здесь лист раздачи открыт — значит
+    // перезагрузить нужно самим.
     $('#sx-manage').addEventListener('click', () => {
-        if (V && V.ownerLink())
-            location.assign(V.ownerLink());
+        const link = V && V.ownerLink();
+        if (!link)
+            return;
+        location.assign(link);
+        if (location.href === new URL(link).href)
+            location.reload();
     });
     $('#sx-copy-bare').addEventListener('click', (e) => {
         if (!V || !V.link)
@@ -1141,10 +1199,16 @@ function wire() {
     });
     // Закрыть вкладку — закрыть раздачу: файлы читаются из неё и больше
     // ниоткуда. Спрашиваем, как спрашивает любой загрузчик.
-    // С «работать без меня» и хотя бы одним сидом уход ничего не ломает —
-    // тогда не спрашиваем. Владельцу без тома уходить можно всегда.
+    // С «работать без меня» и хотя бы одним сидом на связи уход ничего не
+    // ломает — тогда не спрашиваем. Владельцу без тома уходить можно всегда.
+    // Вкладка закрывается (вопрос выше уже задан и принят): сказать релею,
+    // что это уход, а не обрыв.
+    window.addEventListener('pagehide', () => {
+        if (V && !V.manage && V.phase === 'live')
+            V.leaveBeacon();
+    });
     window.addEventListener('beforeunload', (e) => {
-        const free = V && (V.manage || (V.cond && V.cond.leaveOpen && V.finished.size > 0));
+        const free = V && (V.manage || (V.cond && V.cond.leaveOpen && V.liveSeeds() > 0));
         if (V && !free && (V.phase === 'live' || V.phase === 'preparing')) {
             e.preventDefault();
             e.returnValue = '';

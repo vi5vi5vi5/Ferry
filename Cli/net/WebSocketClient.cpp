@@ -72,6 +72,20 @@ std::string toLower(std::string s)
 bool WebSocketClient::connectTo(const std::string &host, uint16_t port, bool tls, bool insecure,
                                 const std::string &path, int timeoutMs, std::string *err)
 {
+    // Соединение можно открыть заново тем же объектом — отправитель так
+    // возвращается после обрыва. Всё, что осталось от прежнего, — в том
+    // числе непрочитанные сообщения, — к новому отношения не имеет.
+    m_in.clear();
+    m_out.clear();
+    m_outOffset = 0;
+    m_pending = 0;
+    m_fragActive = false;
+    m_fragBinary = false;
+    m_frag.clear();
+    m_ready.clear();
+    m_closed = false;
+    m_error.clear();
+
     if (!m_socket.connectTo(host, port, tls, insecure, timeoutMs, err))
         return false;
 

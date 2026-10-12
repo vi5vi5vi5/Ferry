@@ -54,6 +54,13 @@ public:
     // клиент, встретив старый релей, получал бы отказ на первом же have.
     static QJsonArray serverFeatures();
 
+    // Сравнение без утечки по времени. Токен владельца и доказательство
+    // владения ключом — это секреты на 32 байта; побайтовое сравнение с
+    // ранним выходом теоретически позволяет их подбирать, и хотя через сеть
+    // это почти нереально, писать заведомо худший вариант незачем.
+    // Открыто для HttpApi: owner_token приходит и по HTTP (leave).
+    static bool constantTimeEquals(const QByteArray &a, const QByteArray &b);
+
 private slots:
     void onNewConnection();
     void onText(ClientSession *session, const QString &text);
@@ -75,12 +82,6 @@ private:
     void handleResumeOwner(ClientSession *session, const QJsonObject &msg);
 
     void sendError(ClientSession *session, const char *reason, bool closeAfter = true);
-
-    // Сравнение без утечки по времени. Токен владельца и доказательство
-    // владения ключом — это секреты на 32 байта; побайтовое сравнение с
-    // ранним выходом теоретически позволяет их подбирать, и хотя через сеть
-    // это почти нереально, писать заведомо худший вариант незачем.
-    static bool constantTimeEquals(const QByteArray &a, const QByteArray &b);
 
     QWebSocketServer *m_server;
     TransferRegistry *m_registry;   // не владеет

@@ -154,6 +154,9 @@ void TransferServer::onText(ClientSession *session, const QString &text)
     } else if (type == QLatin1String("resume_owner")) {
         handleResumeOwner(session, msg);
     } else if (type == QLatin1String("bye")) {
+        // Отправитель уходит сам — ждать его после закрытия сокета не надо.
+        if (TransferSession *t = session->transfer())
+            t->senderLeaving(session);
         session->close();
     } else if (type == QLatin1String("subscribe_live")) {
         // В M1 подписка на живой поток происходит сразу при hello: других
@@ -318,7 +321,9 @@ void TransferServer::handleResumeOwner(ClientSession *session, const QJsonObject
     }
     QString errorCode;
     const bool serve = msg.value(QStringLiteral("serve")).toBool(false);
-    if (!transfer->resumeOwner(session, serve, &errorCode)) {
+    const bool resumes = msg.value(QStringLiteral("features")).toArray().contains(
+        QString::fromLatin1(ferry::kFeatureResume));
+    if (!transfer->resumeOwner(session, serve, resumes, &errorCode)) {
         sendError(session, errorCode.toLatin1().constData());
         return;
     }
@@ -327,8 +332,13 @@ void TransferServer::handleResumeOwner(ClientSession *session, const QJsonObject
     ok[QStringLiteral("type")] = QStringLiteral("resume_ok");
     ok[QStringLiteral("chunks")] = double(transfer->chunkCount());
     ok[QStringLiteral("features")] = serverFeatures();
+    // С какого места вернувшемуся продолжать сегменты хешей: всё, что
+    // ушло в оборвавшийся сокет после этой границы, до релея не дошло.
+    ok[QStringLiteral("hashed_upto")] = double(transfer->hashedUpTo());
+    ok[QStringLiteral("hashes_complete")] = transfer->hashesComplete();
     session->sendJson(ok);
     session->sendJson(transfer->peersJson());
+    transfer->sendPendingToOwner();
 
     qInfo().noquote() << QStringLiteral("владелец вернулся к %1%2")
                              .arg(Log::keepsIdentifiers() ? QString::fromLatin1(id)

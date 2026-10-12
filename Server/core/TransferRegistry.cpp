@@ -140,6 +140,8 @@ void TransferRegistry::sweep()
     for (TransferSession *s : all) {
         if (s->state() == TransferSession::State::Delegated)
             s->checkDelegated(now);
+        else if (s->senderAway())
+            s->checkSenderGrace(now);
     }
 
     QList<TransferSession *> doomed;

@@ -21,7 +21,12 @@
 #include "core/Json.h"
 #include "core/Link.h"
 #include "core/Manifest.h"
+#include "core/Unicode.h"
 #include "core/VolumeLayout.h"
+
+#ifdef FERRY_TEST_PASSWORD
+#include "Cli/Password.h"
+#endif
 
 namespace {
 
@@ -631,6 +636,46 @@ void testLink()
 
 // Сквозной проход: то, что делает отправитель, и то, что делает получатель.
 // Без сети и без сервера — только форматы.
+void testUnicode()
+{
+    section("NFC");
+    struct Case {
+        std::vector<uint32_t> in, out;
+        const char *what;
+    };
+    const Case cases[] = {
+        {{0x0438, 0x0306}, {0x0439}, "и + бреве → й"},
+        {{0x0415, 0x0308}, {0x0401}, "Е + умлаут → Ё"},
+        {{0x0456, 0x0308, 0x0443, 0x0306}, {0x0457, 0x045E}, "ї и ў"},
+        {{0x0065, 0x0302, 0x0323}, {0x1EC7}, "знаки не по порядку: e + ̂ + ̣ → ệ"},
+        {{0x00C5, 0x0323}, {0x1EA0, 0x030A}, "готовый знак разбирается и собирается заново"},
+        {{0x0061, 0x0301, 0x0301}, {0x00E1, 0x0301}, "второй знак того же класса заблокирован"},
+        {{0x0301, 0x0061}, {0x0301, 0x0061}, "знак сочетания в начале остаётся"},
+        {{0x1100, 0x1161, 0x11A8}, {0xAC01}, "хангыль: чамо → слог"},
+        {{0x304B, 0x3099}, {0x304C}, "кана с дакутэном"},
+        {{0x043C, 0x043E, 0x0439, 0x0020, 0x0451, 0x0436}, {0x043C, 0x043E, 0x0439, 0x0020, 0x0451, 0x0436},
+         "строка уже в NFC не меняется"},
+    };
+    for (const Case &c : cases) {
+        std::vector<uint32_t> v = c.in;
+        ferry::toNfc(v);
+        check(v == c.out, c.what);
+    }
+
+#ifdef FERRY_TEST_PASSWORD
+    section("Пароль: выравнивание как в браузере");
+    // Одна фраза тремя способами: как набрана, как отдаёт macOS (NFD) и
+    // с BOM из Блокнота. Браузер (password.js) даёт для всех трёх одно.
+    const std::string nfc = "Мой серый ёж ест йогурт утром";
+    const std::string nfd = "Мои\xCC\x86 серыи\xCC\x86 е\xCC\x88ж ест и\xCC\x86огурт утром";
+    const std::string bom = "\xEF\xBB\xBF" + nfc + "\xEF\xBB\xBF";
+    const std::string want = "мой серый еж ест йогурт утром";
+    check(ferry::cli::normalizePassword(nfc) == want, "NFC: " + ferry::cli::normalizePassword(nfc));
+    check(ferry::cli::normalizePassword(nfd) == want, "NFD даёт тот же ключ");
+    check(ferry::cli::normalizePassword(bom) == want, "BOM по краям срезается");
+#endif
+}
+
 void testEndToEnd()
 {
     section("Сквозной проход: отправитель -> получатель");
@@ -733,6 +778,7 @@ int main()
     testManifest();
     testHashSegments();
     testLink();
+    testUnicode();
     testEndToEnd();
 
     std::printf("\n%s: проверок %d, провалов %d\n",

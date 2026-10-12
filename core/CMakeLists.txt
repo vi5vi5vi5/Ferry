@@ -79,6 +79,7 @@ add_library(ferry-core STATIC
     Manifest.h    Manifest.cpp
     Protocol.h
     Types.h
+    Unicode.h     Unicode.cpp   UnicodeTables.inc
     VolumeLayout.h VolumeLayout.cpp
 )
 

@@ -9,7 +9,7 @@
      скриптов, ни запросов в сторону. Стили в атрибутах — из макетов.
      wasm-unsafe-eval — только для Argon2id в режиме пароля: он разрешает
      собрать WebAssembly из своего же скрипта, но не eval. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; frame-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <title>Ferry — приём тома</title>
 <link rel="icon" href="data:,">
 <!-- Сцены перенесены из макета «Ferry · ночная переправа» (Claude Design)

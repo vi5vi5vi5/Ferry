@@ -16,7 +16,8 @@
 // Всё здесь работает внутри воркера: синхронный доступ к OPFS вне
 // воркера браузер не даёт.
 
-import { slice } from './manifest.js';
+import { slice, safeFileName } from './manifest.js';
+import { ZipStream } from './zipstream.js';
 
 const DIR = 'ferry-recv';
 const STATE = 'state.json';
@@ -402,6 +403,232 @@ export class DirectStore {
             }
         }
         this.writers.clear();
+    }
+
+    async discard() {
+        await this.close();
+    }
+}
+
+// ---- потоком в «Загрузки» через Service Worker (путь C) ----
+//
+// Тому не хватает места в хранилище браузера, а писать в папку браузер не
+// умеет (Firefox, Safari) — остаётся сама загрузка. Service Worker
+// (dl.sw.js) отдаёт браузеру ответ-поток с заранее известной длиной, а
+// байты в него приходят отсюда, через MessagePort, в том порядке, в каком
+// их запишет менеджер загрузок. Дерево собирается в ZIP на лету.
+//
+// Цена — порядок: в загрузку можно только дописывать. Поэтому приём идёт
+// одной волной, строго с начала до конца (получатель объявляет себя как
+// клиент M1, без диапазонов), прочитать принятое нельзя — ни раздачи
+// другим, ни докачки после перезагрузки. Зато места нужно ровно столько,
+// сколько весит сам файл в «Загрузках».
+//
+// Протокол с SW — «по запросу»: SW просит кусок (pull), когда браузеру
+// нужны данные, и получает ровно один ответ — data, end или abort. Так
+// очередь здесь — единственная, и её предел и есть давление назад.
+
+const STREAM_HIGH = 32 * 1024 * 1024;     // сколько держим, пока SW не заберёт
+const FIRST_PULL_MS = 20000;              // попросили загрузку, а она не началась
+const STALL_PULL_MS = 60000;              // загрузка встала посреди
+
+// Как назовётся загрузка и сколько в ней будет байт — странице это нужно
+// раньше воркера: Content-Length отдаётся до первого байта.
+export function streamTarget(manifest) {
+    const base = safeFileName(manifest.name) || 'ferry';
+    if (manifest.kind !== 'tree')
+        return { file: base, top: '', size: manifest.total, zip: false };
+    return { file: base + '.zip', top: base, size: new ZipStream(manifest, base, () => {}).size, zip: true };
+}
+
+export class StreamStore {
+    constructor(port, manifest) {
+        this.kind = 'stream';
+        this.canRead = false;
+        this.persistent = false;
+        this.sequential = true;
+        this.port = port;
+        this.manifest = manifest;
+        this.target = streamTarget(manifest);
+        this.zip = null;
+        this.queue = [];
+        this.queued = 0;
+        this.pulls = 0;            // просьбы SW, на которые ещё не ответили
+        this.everPulled = false;
+        this.lastPull = 0;
+        this.written = 0;          // байт тома, пришедших по порядку
+        this.ending = false;       // всё отдано в очередь, осталось дослать
+        this.ended = false;        // SW закрыл загрузку
+        this.failed = null;
+        this.space = [];           // кто ждёт места в очереди
+        this.closedWait = null;
+        this.timer = null;
+        this.wantAt = 0;
+        this.onError = null;       // приём узнаёт об обрыве, даже если стоит
+        this.onWant = null;        // пора открывать загрузку
+    }
+
+    async open() {
+        if (this.target.zip)
+            this.zip = new ZipStream(this.manifest, this.target.top, (u8) => this.push(u8));
+        this.port.onmessage = (e) => this.onPort(e.data || {});
+        this.timer = setInterval(() => this.watch(), 1000);
+        return null;
+    }
+
+    // Загрузку страница открывает, когда есть что в неё писать, а не по
+    // нажатию «Принять»: отказ сервера или долгое ожидание у двери иначе
+    // оставляли бы в «Загрузках» неудавшийся файл.
+    want() {
+        if (this.wantAt)
+            return;
+        this.wantAt = Date.now();
+        if (this.onWant)
+            this.onWant();
+    }
+
+    onPort(m) {
+        if (this.failed || this.ended)
+            return;
+        if (m.type === 'pull') {
+            this.pulls++;
+            this.everPulled = true;
+            this.lastPull = Date.now();
+            this.drain();
+        } else if (m.type === 'closed') {
+            this.ended = true;
+            this.stopWatch();
+            if (this.closedWait)
+                this.closedWait.resolve();
+        } else if (m.type === 'cancel') {
+            this.die(new StoreError('stream_broken', 'Загрузку отменили в браузере.'), { tellSw: false });
+        }
+    }
+
+    push(u8) {
+        if (u8.length === 0)
+            return;
+        this.queue.push(u8);
+        this.queued += u8.length;
+    }
+
+    // Ответить на столько просьб SW, сколько есть данных.
+    drain() {
+        while (this.pulls > 0 && this.queue.length) {
+            const piece = this.queue.shift();
+            this.queued -= piece.length;
+            this.pulls--;
+            // Копия: кусок может быть срезом чанка, другие срезы которого
+            // ещё в очереди, а передать буфер можно только целиком.
+            const buf = piece.slice().buffer;
+            this.port.postMessage({ type: 'data', buf }, [buf]);
+        }
+        if (this.pulls > 0 && this.ending && !this.queue.length) {
+            this.pulls--;
+            this.port.postMessage({ type: 'end' });
+        }
+        while (this.space.length && this.queued < STREAM_HIGH)
+            this.space.shift().resolve();
+    }
+
+    watch() {
+        const now = Date.now();
+        if (!this.everPulled && this.wantAt && now - this.wantAt > FIRST_PULL_MS) {
+            this.die(new StoreError('no_stream',
+                'Браузер так и не начал загрузку: фоновый обработчик загрузок не ответил.'));
+        } else if (this.everPulled && !this.pulls && (this.queue.length || this.ending)
+            && now - this.lastPull > STALL_PULL_MS) {
+            this.die(new StoreError('stream_broken',
+                'Загрузка встала: браузер минуту не забирал данные — её поставили на паузу или фоновый обработчик остановлен.'));
+        }
+    }
+
+    stopWatch() {
+        clearInterval(this.timer);
+        this.timer = null;
+    }
+
+    // Обрыв: загрузка в браузере помечается неудавшейся (а не обрезанным
+    // «готовым» файлом), ждущие узнают причину.
+    die(err, { tellSw = true, notify = true } = {}) {
+        if (this.failed || this.ended)
+            return;
+        this.failed = err;
+        this.stopWatch();
+        if (tellSw) {
+            try {
+                this.port.postMessage({ type: 'abort', reason: err.code });
+            } catch {
+                // порт уже закрыт
+            }
+        }
+        this.queue = [];
+        this.queued = 0;
+        for (const w of this.space.splice(0))
+            w.reject(err);
+        if (this.closedWait)
+            this.closedWait.reject(err);
+        if (notify && this.onError)
+            this.onError(err);
+    }
+
+    async write(offset, bytes) {
+        if (this.failed)
+            throw this.failed;
+        if (offset !== this.written)
+            throw new StoreError('io', 'поток в «Загрузки» пишется только по порядку');
+        this.want();
+        this.written += bytes.length;
+        if (this.zip)
+            this.zip.feed(bytes);
+        else
+            this.push(bytes);
+        this.drain();
+        if (this.queued >= STREAM_HIGH)
+            await new Promise((resolve, reject) => this.space.push({ resolve, reject }));
+    }
+
+    async read() {
+        return null;
+    }
+
+    async saveState() {}
+
+    // Всё пришло и сверено: дописать хвост архива и дождаться, пока SW
+    // закроет загрузку. Только теперь файл в «Загрузках» целый.
+    async flush() {
+        if (this.ended)
+            return;
+        if (this.failed)
+            throw this.failed;
+        if (!this.ending) {
+            if (this.zip)
+                this.zip.finish();
+            this.ending = true;
+        }
+        this.want();
+        const done = new Promise((resolve, reject) => {
+            this.closedWait = { resolve, reject };
+        });
+        this.drain();
+        await done;
+    }
+
+    async finish() {}
+
+    async volumeBlob() {
+        return null;
+    }
+
+    // Остановили или приём упал: о причине приём знает сам, SW — нет.
+    async close() {
+        if (!this.ended)
+            this.die(new StoreError('stream_broken', 'Приём остановлен — загрузка оборвана.'), { notify: false });
+        this.stopWatch();
+    }
+
+    async abort(code) {
+        this.die(new StoreError(code || 'stream_broken', ''), { notify: false });
     }
 
     async discard() {

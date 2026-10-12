@@ -161,6 +161,14 @@ bool apiCreateTransfer(const Relay &relay, CreatedTransfer &out, std::string *er
     return true;
 }
 
+void apiLeave(const Relay &relay, const std::string &id, const std::string &ownerToken)
+{
+    net::HttpResponse resp;
+    std::string err;
+    net::httpRequest(relay.target(), "POST", std::string(kApiTransfers) + "/" + id + "/leave",
+                     ownerToken, resp, &err, 3000);
+}
+
 bool apiFetchMeta(const Relay &relay, const std::string &id, TransferMeta &out, std::string *err)
 {
     net::HttpResponse resp;

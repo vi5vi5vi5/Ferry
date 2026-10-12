@@ -304,6 +304,34 @@ bool askYesNo(const std::string &question)
     return false;
 }
 
+// Жетон возврата лежит рядом с недокачкой одной строкой. Пустая строка —
+// жетона нет: файла нет, не читается или в нём мусор длиннее разумного.
+std::string loadRejoinToken(const std::string &path)
+{
+    platform::FileInfo info;
+    if (!platform::fileStat(path, info) || !info.isRegular || info.size == 0 || info.size > 64)
+        return {};
+    const platform::File f = platform::fileOpenRead(path);
+    if (f == platform::kInvalidFile)
+        return {};
+    std::string token(size_t(info.size), '\0');
+    const int64_t got = platform::fileReadAt(f, token.data(), token.size(), 0);
+    platform::fileClose(f);
+    if (got != int64_t(token.size()))
+        return {};
+    return token;
+}
+
+void saveRejoinToken(const std::string &path, const std::string &token)
+{
+    const platform::File f = platform::fileOpenReadWrite(path);
+    if (f == platform::kInvalidFile)
+        return;
+    platform::fileTruncate(f, 0);
+    platform::fileWriteAt(f, token.data(), token.size(), 0);
+    platform::fileClose(f);
+}
+
 } // namespace
 
 int runGet(const Options &options)
@@ -516,6 +544,10 @@ int runGet(const Options &options)
     // настоящим именем, и человек решит, что всё готово.
     const std::string partPath = outPath + ".ferry-part";
     const std::string mapPath = outPath + ".ferry-map";
+    // Жетон возврата из hello_ok. С ним повторный запуск после обрыва —
+    // тот же получатель: использование ссылки он уже потратил, и второй
+    // раз его не спишут и не спросят отправителя у двери.
+    const std::string rejoinPath = outPath + ".ferry-rejoin";
 
     // Раскладка тома: какой байт какому файлу принадлежит. Для одиночного
     // файла это один файл во весь том, и дальше вся запись идёт одной
@@ -605,6 +637,10 @@ int runGet(const Options &options)
             }
         }
     }
+    // Жетон годится только вместе со своей недокачкой.
+    const std::string rejoinToken = resuming ? loadRejoinToken(rejoinPath) : std::string();
+    if (!resuming)
+        platform::fileRemove(rejoinPath);
     if (!resuming) {
         map.init(mapPath, plan.chunkCount, plan.chunkSize, plan.totalBytes, manifest.root);
         // Недокачки прошлого раза может не быть, а может быть чужая — в
@@ -679,6 +715,8 @@ int runGet(const Options &options)
         hello.set("proof", json::Value::make(base64UrlEncode(proof)));
         if (!options.name.empty())
             hello.set("name", json::Value::make(options.name));
+        if (!rejoinToken.empty())
+            hello.set("rejoin", json::Value::make(rejoinToken));
         // Докуда мы уже дошли. Сервер поставит курсор сюда и не будет
         // присылать то, что у нас есть.
         hello.set("have_upto", json::Value::make(int64_t(map.havePrefix())));
@@ -742,6 +780,9 @@ int runGet(const Options &options)
             if (type == "hello_ok") {
                 accepted = true;
                 serverSpeaksRanges = announces(v, "ranges");
+                const std::string token = v["rejoin"].toString();
+                if (!token.empty() && token.size() <= 64)
+                    saveRejoinToken(rejoinPath, token);
             } else if (type == "approval_pending") {
                 // Ключ принят, решает человек. Сколько он будет думать —
                 // неизвестно, поэтому срок ожидания снимается: уйти можно
@@ -857,6 +898,8 @@ int runGet(const Options &options)
                     const std::string st = v["state"].toString();
                     if (st == "delegated")
                         stateLine = "отправитель ушёл — раздают те, кто скачал том целиком";
+                    else if (st == "active" && v["sender_away"].toBool(false))
+                        stateLine = "связь с отправителем пропала — ждём, он обещал вернуться";
                     else if (st == "active")
                         stateLine.clear();
                 } else if (type == "stats") {
@@ -1224,6 +1267,7 @@ int runGet(const Options &options)
         return 1;
     }
     map.remove();
+    platform::fileRemove(rejoinPath);
 
     const int64_t tookMs = nowMs() - startedMs;
     std::printf("\n%s%s%s\n", ok(), ruleTop("готово", cells).c_str(), reset());

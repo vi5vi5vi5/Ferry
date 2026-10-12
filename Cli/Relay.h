@@ -49,6 +49,13 @@ struct CreatedTransfer
 
 bool apiCreateTransfer(const Relay &relay, CreatedTransfer &out, std::string *err);
 
+// Отправитель уходит сам. По HTTP, а не по сокету: в сокете перед bye
+// стоят мегабайты чанков, и на медленном канале он дошёл бы до релея
+// через минуту — а релей тем временем принял бы закрытие за обрыв и
+// держал бы получателей в ожидании. Ответ не важен: не дошло — релей
+// подождёт и закроет сам.
+void apiLeave(const Relay &relay, const std::string &id, const std::string &ownerToken);
+
 struct TransferMeta
 {
     uint64_t total = 0;

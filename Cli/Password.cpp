@@ -5,6 +5,7 @@
 
 #include "argon2.h"
 #include "core/Protocol.h"
+#include "core/Unicode.h"
 
 namespace ferry::cli {
 namespace {
@@ -74,10 +75,12 @@ void encode(uint32_t cp, std::string &out)
 bool isSpace(uint32_t cp)
 {
     // Пробельные из ASCII, неразрывный пробел и пробелы общего блока:
-    // мессенджеры охотно подменяют обычный пробел неразрывным.
+    // мессенджеры охотно подменяют обычный пробел неразрывным. U+FEFF (BOM)
+    // — потому что его считает пробелом \s браузера, а Блокнот кладёт его
+    // в начало файла, из которого фразу потом копируют.
     return cp == 0x20 || (cp >= 0x09 && cp <= 0x0D) || cp == 0xA0 || cp == 0x1680
            || (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 || cp == 0x202F
-           || cp == 0x205F || cp == 0x3000;
+           || cp == 0x205F || cp == 0x3000 || cp == 0xFEFF;
 }
 
 uint32_t fold(uint32_t cp)
@@ -95,9 +98,13 @@ uint32_t fold(uint32_t cp)
 
 std::string normalizePassword(const std::string &utf8)
 {
+    // Сначала NFC, как normalize('NFC') в браузере: иначе «й», вставленная
+    // двумя знаками (и + U+0306), дала бы другой ключ.
+    std::vector<uint32_t> cps = decode(utf8);
+    toNfc(cps);
     std::string out;
     bool pendingSpace = false;
-    for (uint32_t cp : decode(utf8)) {
+    for (uint32_t cp : cps) {
         if (isSpace(cp)) {
             pendingSpace = !out.empty();
             continue;

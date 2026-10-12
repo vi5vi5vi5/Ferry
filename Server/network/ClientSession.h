@@ -46,6 +46,10 @@ public:
     QString name() const { return m_name; }
     void setName(const QString &name) { m_name = name; }
 
+    // Токен возврата, выданный в hello_ok (TransferSession::m_rejoin).
+    QByteArray rejoinToken() const { return m_rejoinToken; }
+    void setRejoinToken(const QByteArray &token) { m_rejoinToken = token; }
+
     TransferSession *transfer() const { return m_transfer; }
     void setTransfer(TransferSession *t) { m_transfer = t; }
 
@@ -110,6 +114,10 @@ public:
     // Что получатель просит. Заполняется сообщением request.
     ferry::ChunkSet &wanted() { return m_wanted; }
     const ferry::ChunkSet &wanted() const { return m_wanted; }
+
+    // Что мы хоть раз просили его отдать (serve). Чанк от сида принимается,
+    // только если он здесь есть: чужого мы не заказывали.
+    ferry::ChunkSet &askedToServe() { return m_askedToServe; }
 
     // Откуда искать следующий недостающий чанк для второй волны.
     // Чисто ускорение: без неё планировщик просматривал бы карту
@@ -181,6 +189,7 @@ private:
     Role m_role = Role::Unknown;
     quint32 m_receiverId = 0;
     QString m_name;
+    QByteArray m_rejoinToken;
     QString m_peerAddress;
     TransferSession *m_transfer = nullptr;
     quint64 m_cursor = 0;
@@ -197,4 +206,5 @@ private:
     ferry::ChunkSet m_have;
     ferry::ChunkSet m_sent;
     ferry::ChunkSet m_wanted;
+    ferry::ChunkSet m_askedToServe;
 };

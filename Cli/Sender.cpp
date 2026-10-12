@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -36,6 +37,13 @@ namespace {
 // Доля догона в аплоаде отправителя — три десятых (§6).
 constexpr uint64_t kBackfillShare = 3;
 constexpr uint64_t kLiveShare = 7;
+
+// Сколько возвращаемся после обрыва. Релей ждёт тридцать секунд
+// (kSenderGraceMs) — пробуем чуть меньше, чтобы не прийти к уже закрытой.
+constexpr int64_t kResumeWindowMs = 25000;
+// Релей шлёт отправителю сводку раз в секунду. Тишина дольше — соединение
+// мертво, даже если TCP об этом ещё не знает: так выглядит смена сети.
+constexpr int64_t kSilenceMs = 15000;
 
 int64_t nowMs()
 {
@@ -512,6 +520,14 @@ int runSend(const Options &options, const Relay &relay)
             policy.set("max_concurrent", json::Value::make(int64_t(options.maxConcurrent)));
         offer.set("policy", std::move(policy));
 
+        // Обещаем вернуться после обрыва — тогда релей подождёт нас, а не
+        // закроет раздачу на первой же заминке сети.
+        if (created.hasFeature(kFeatureResume)) {
+            json::Value features = json::Value::array();
+            features.push(json::Value::make(kFeatureResume));
+            offer.set("features", std::move(features));
+        }
+
         ws.sendText(offer.dump());
     }
 
@@ -704,11 +720,123 @@ int runSend(const Options &options, const Relay &relay)
         ws.sendText(a.dump());
     };
 
+    // Сегменты хешей, которые уже уходили: с какого чанка и сколько. После
+    // обрыва релей скажет, докуда принял, и сегмент с того места должен
+    // уйти ТОЧНО таким же: nonce у сегмента зависит только от начала, и
+    // другой длины под тем же nonce GCM не прощает.
+    std::map<uint64_t, uint64_t> segmentCount;
+
+    // Обрыв. Релей, объявивший resume, держит раздачу и ждёт нас: вернуться
+    // с resume_owner serve:true. Что было в пути, пропало вместе с сокетом,
+    // поэтому очереди начинаются заново — релей попросит недостающее сам.
+    const bool canResume = created.hasFeature(kFeatureResume);
+    int64_t lastHeardMs = nowMs();
+    const auto reconnect = [&]() -> bool {
+        const int64_t deadline = nowMs() + kResumeWindowMs;
+        int64_t delay = 500;
+        int attempt = 0;
+        std::string why;
+        while (nowMs() < deadline && !stopRequested()) {
+            ++attempt;
+            panel.update({std::string(warn()) + "связь с релеем пропала — возвращаюсь, попытка "
+                              + std::to_string(attempt) + reset(),
+                          std::string(dim()) + "получатели ждут на месте; Ctrl-C — бросить"
+                              + reset()});
+            std::string cerr;
+            if (ws.connectTo(relay.host, relay.port, relay.tls, relay.insecure,
+                             std::string(kWsPath), 10000, &cerr)) {
+                json::Value r = json::Value::object();
+                r.set("type", json::Value::make("resume_owner"));
+                r.set("id", json::Value::make(created.id));
+                r.set("owner_token", json::Value::make(created.ownerToken));
+                r.set("serve", json::Value::make(true));
+                json::Value f = json::Value::array();
+                f.push(json::Value::make(kFeatureResume));
+                r.set("features", std::move(f));
+                ws.sendText(r.dump());
+
+                const int64_t wait = nowMs() + 10000;
+                while (nowMs() < wait && !stopRequested()) {
+                    if (!ws.pump(100)) {
+                        const std::string reason = drainErrorReason(ws);
+                        if (!reason.empty()) {
+                            failure = explainError(reason);
+                            return false;
+                        }
+                        why = ws.error();
+                        break;
+                    }
+                    // По одному: всё, что придёт после resume_ok, разберёт
+                    // основной цикл.
+                    net::WsMessage msg;
+                    while (ws.next(msg)) {
+                        json::Value v;
+                        if (msg.binary || !json::Value::parse(msg.data, v) || !v.isObject())
+                            continue;
+                        const std::string type = v["type"].toString();
+                        if (type == "error") {
+                            failure = explainError(v["reason"].toString());
+                            return false;
+                        }
+                        if (type != "resume_ok")
+                            continue;
+
+                        pendingLive.reset(plan.chunkCount);
+                        pendingBackfill.reset(plan.chunkCount);
+                        liveHint = 0;
+                        backfillHint = 0;
+                        // Вопросы у двери релей пришлёт заново.
+                        knocks.clear();
+                        if (streamHashes) {
+                            const uint64_t upto = uint64_t(std::max<int64_t>(
+                                0, v["hashed_upto"].toInt(0)));
+                            hashesSent = std::min(hashesSent, upto);
+                            hashesDoneSent = v["hashes_complete"].toBool(false);
+                        }
+                        // Пока нас не было, раздача могла уйти на сиды, и
+                        // подтверждение тогда снялось (freeze). Мы вернулись
+                        // — спрашивать снова, как человек и просил.
+                        if (options.approve && !v["require_approval"].toBool(false)) {
+                            json::Value pol = json::Value::object();
+                            pol.set("type", json::Value::make("policy"));
+                            pol.set("require_approval", json::Value::make(true));
+                            ws.sendText(pol.dump());
+                        }
+                        lastHeardMs = nowMs();
+                        return true;
+                    }
+                }
+            } else {
+                why = cerr;
+            }
+            const int64_t until = std::min(deadline, nowMs() + delay);
+            while (nowMs() < until && !stopRequested())
+                platform::sleepMs(50);
+            delay = std::min<int64_t>(delay * 2, 4000);
+        }
+        if (failure.empty() && !stopRequested())
+            failure = "связь с релеем пропала и не вернулась"
+                      + (why.empty() ? std::string() : ": " + why);
+        return false;
+    };
+
     while (!stopRequested() && ws.isOpen()) {
         if (!ws.pump(100)) {
             if (!stopRequested()) {
-                failed = true;
                 const std::string reason = drainErrorReason(ws);
+                // Релей сказал, почему закрыл, — это конец. Молча — обрыв.
+                if (reason.empty() && canResume) {
+                    const std::string lost = ws.error();
+                    if (reconnect())
+                        continue;
+                    if (stopRequested())
+                        break;
+                    if (failure.empty())
+                        failure = lost.empty() ? std::string("соединение закрылось") : lost;
+                    failed = true;
+                    break;
+                }
+                failed = true;
                 if (!reason.empty())
                     failure = explainError(reason);
                 else
@@ -719,6 +847,7 @@ int runSend(const Options &options, const Relay &relay)
 
         net::WsMessage msg;
         while (ws.next(msg)) {
+            lastHeardMs = nowMs();
             if (msg.binary)
                 continue;
             json::Value v;
@@ -757,6 +886,17 @@ int runSend(const Options &options, const Relay &relay)
         }
         if (failed)
             break;
+
+        if (canResume && nowMs() - lastHeardMs > kSilenceMs) {
+            if (reconnect())
+                continue;
+            if (!stopRequested()) {
+                failed = true;
+                if (failure.empty())
+                    failure = "релей перестал отвечать";
+            }
+            break;
+        }
 
         // ---- кто у двери ----
         // Клавиши читаются, только пока есть вопрос: всё остальное время
@@ -806,7 +946,11 @@ int runSend(const Options &options, const Relay &relay)
             if (ready > hashesSent
                 && (starving || batch || stale || ready == plan.chunkCount)) {
                 while (hashesSent < ready) {
-                    const uint64_t n = std::min<uint64_t>(ready - hashesSent, kHashSegmentMax);
+                    const auto seen = segmentCount.find(hashesSent);
+                    const uint64_t n = seen != segmentCount.end()
+                                           ? seen->second
+                                           : std::min<uint64_t>(ready - hashesSent, kHashSegmentMax);
+                    segmentCount[hashesSent] = n;
                     Bytes raw(size_t(n) * 32);
                     for (uint64_t k = 0; k < n; ++k)
                         std::memcpy(raw.data() + size_t(k) * 32, hasher.at(hashesSent + k).data(),
@@ -1004,6 +1148,13 @@ int runSend(const Options &options, const Relay &relay)
     panel.finish();
     if (keysOn)
         platform::consoleKeys(false);
+    // Уходим сами — сказать об этом. Иначе релей принял бы закрытие за
+    // обрыв и держал бы получателей у стоящей полосы, ожидая нас назад.
+    // Сначала по HTTP (сокет может быть забит чанками), потом и в сокет.
+    if (!failed && canResume)
+        apiLeave(relay, created.id, created.ownerToken);
+    if (!failed && ws.isOpen())
+        ws.sendText(R"({"type":"bye"})");
     ws.closeGracefully();
 
     // Ушёл сам, разрешив раздаче жить без него. Жива ли она — решает

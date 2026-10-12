@@ -2,6 +2,7 @@
 
 #include <QDateTime>
 #include <QJsonArray>
+#include <QRandomGenerator>
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -242,6 +243,12 @@ bool TransferSession::applyOffer(const QJsonObject &msg, QString *errorCode)
         return fail(ferry::err::kBadMessage);
     m_freezeOnLeave = onLeave == QLatin1String("freeze");
 
+    // Что умеет отправитель. Молчание — «не умеет»: старый отправитель
+    // после обрыва не вернётся, и ждать его значило бы держать получателей
+    // у стоящей полосы ни за что.
+    m_senderResumes = msg.value(QStringLiteral("features")).toArray().contains(
+        QString::fromLatin1(ferry::kFeatureResume));
+
     // Окно меряется ФРЕЙМАМИ, а не открытыми чанками: хранится в нём
     // ровно то, что приехало от отправителя и уедет получателям —
     // заголовок, шифротекст и тег GCM. Считать по размеру чанка значило бы
@@ -252,6 +259,8 @@ bool TransferSession::applyOffer(const QJsonObject &msg, QString *errorCode)
     m_backfillInFlight.reset(m_chunkCount);
     m_askedOf.clear();
     m_servedBy.clear();
+    m_forgotten.clear();
+    m_backfillStallMs = std::max(kStallMs, qint64(m_chunkSize) * 1000 / kSlowUplinkBytesPerSec);
     m_lastGrowthMs = QDateTime::currentMSecsSinceEpoch();
     m_hasOffer = true;
     m_state = State::Active;
@@ -306,6 +315,12 @@ QJsonObject TransferSession::stateJson(qint64 nowMs) const
         m_freezeOnLeave ? QStringLiteral("freeze") : QStringLiteral("close");
     o[QStringLiteral("max_concurrent")] = m_maxConcurrent;
     o[QStringLiteral("receivers")] = m_receivers.size();
+    // Связь с отправителем пропала, и раздача ждёт его: получателю стоит
+    // знать, почему полоса стоит, и сколько ещё ждать.
+    o[QStringLiteral("sender_away")] = m_senderLostAtMs != 0;
+    if (m_senderLostAtMs != 0)
+        o[QStringLiteral("sender_wait_ms")] =
+            double(std::max<qint64>(0, kSenderGraceMs - (nowMs - m_senderLostAtMs)));
     return o;
 }
 
@@ -322,6 +337,8 @@ QJsonArray TransferSession::serverFeatures()
     f.append(QString::fromLatin1(ferry::kFeaturePolicy));
     // Пароль вместо ключа: соль в метаданных, ключ из Argon2id.
     f.append(QString::fromLatin1(ferry::kFeaturePassword));
+    // Отправителя после обрыва ждут kSenderGraceMs, а не закрывают сразу.
+    f.append(QString::fromLatin1(ferry::kFeatureResume));
     return f;
 }
 
@@ -347,7 +364,26 @@ TransferSession::Admission TransferSession::attachReceiver(ClientSession *receiv
         return fail(ferry::err::kSenderGone);
     if (nowMs >= m_expiresAtMs)
         return fail(ferry::err::kExpired);
-    if (m_usesLeft == 0)
+
+    // Вернулся тот, кого уже пускали (обрыв, перезагрузка вкладки): токен
+    // возврата из его hello_ok. Использование он уже потратил, владелец его
+    // уже пустил — второй раз ни того, ни другого не нужно. Неизвестный или
+    // погасший токен — не ошибка: такой hello просто идёт обычным путём.
+    QByteArray rejoin = QByteArray::fromBase64(
+        hello.value(QStringLiteral("rejoin")).toString().toLatin1(),
+        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+    if (rejoin.size() != int(ferry::kRejoinTokenSize) || !m_rejoin.contains(rejoin))
+        rejoin.clear();
+    // Старый сокет того же получателя ещё числится живым — сеть «провалилась»
+    // без закрытия. Вытесняем его, как вытесняет вернувшийся отправитель.
+    if (!rejoin.isEmpty()) {
+        if (ClientSession *stale = m_rejoin.value(rejoin).current) {
+            detach(stale);
+            stale->close();
+        }
+    }
+
+    if (rejoin.isEmpty() && m_usesLeft == 0)
         return fail(ferry::err::kUsesExhausted);
     // Ждущие решения считаются вместе с теми, кто качает: иначе потолок
     // обходился бы очередью у двери.
@@ -374,6 +410,7 @@ TransferSession::Admission TransferSession::attachReceiver(ClientSession *receiv
     receiver->have().reset(m_chunkCount);
     receiver->sent().reset(m_chunkCount);
     receiver->wanted().reset(m_chunkCount);
+    receiver->askedToServe().reset(m_chunkCount);
 
     std::vector<ferry::ChunkRange> haveRanges;
     if (!parseRanges(hello.value(QStringLiteral("have")), m_chunkCount, haveRanges))
@@ -399,7 +436,13 @@ TransferSession::Admission TransferSession::attachReceiver(ClientSession *receiv
     // пока ему не сказали «да». Без владельца подтверждать некому, и
     // такого состояния не бывает: при уходе подтверждение либо снято,
     // либо раздача закрыта (onSenderLeft).
-    if (m_requireApproval && m_owner) {
+    //
+    // Одно исключение: связь с отправителем пропала, и он вот-вот
+    // вернётся. Пустить без спроса значило бы, что минута без сети
+    // отменяет подтверждение. Встаёт в очередь молча — вопрос уйдёт
+    // вернувшемуся (sendPendingToOwner), а не вернётся — решит
+    // onSenderLeft: снимет подтверждение по freeze или закроет раздачу.
+    if (m_requireApproval && (m_owner || senderAway()) && rejoin.isEmpty()) {
         if (m_pending.size() >= kMaxPending) {
             receiver->setTransfer(nullptr);
             return fail(ferry::err::kTooManyReceivers);
@@ -411,18 +454,15 @@ TransferSession::Admission TransferSession::attachReceiver(ClientSession *receiv
         wait[QStringLiteral("type")] = QStringLiteral("approval_pending");
         receiver->sendJson(wait);
 
-        QJsonObject ask;
-        ask[QStringLiteral("type")] = QStringLiteral("approval_request");
-        ask[QStringLiteral("receiver")] = int(receiver->receiverId());
-        ask[QStringLiteral("name")] = receiver->name();
-        m_owner->sendJson(ask);
+        if (m_owner)
+            m_owner->sendJson(approvalRequestJson(receiver));
         return Admission::Pending;
     }
 
-    return admit(receiver, errorCode) ? Admission::Admitted : Admission::Rejected;
+    return admit(receiver, errorCode, rejoin) ? Admission::Admitted : Admission::Rejected;
 }
 
-bool TransferSession::admit(ClientSession *receiver, QString *errorCode)
+bool TransferSession::admit(ClientSession *receiver, QString *errorCode, const QByteArray &rejoin)
 {
     const auto fail = [&](const char *code) {
         if (errorCode)
@@ -438,7 +478,7 @@ bool TransferSession::admit(ClientSession *receiver, QString *errorCode)
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     if (nowMs >= m_expiresAtMs)
         return fail(ferry::err::kExpired);
-    if (m_usesLeft == 0)
+    if (rejoin.isEmpty() && m_usesLeft == 0)
         return fail(ferry::err::kUsesExhausted);
     if (m_receivers.size() >= m_maxConcurrent)
         return fail(ferry::err::kTooManyReceivers);
@@ -466,7 +506,9 @@ bool TransferSession::admit(ClientSession *receiver, QString *errorCode)
             return fail(ferry::err::kNoSource);
         // Без отправителя живой волны нет, а ничего, кроме неё, клиент M1
         // не понимает: он простоял бы на краю окна до конца срока.
-        if (!m_sender)
+        // Пока его ждут после обрыва — пускаем: живая волна продолжится,
+        // как только он вернётся, а не вернётся — отказ придёт тогда.
+        if (!m_sender && !senderAway())
             return fail(ferry::err::kSenderGone);
     }
 
@@ -484,9 +526,10 @@ bool TransferSession::admit(ClientSession *receiver, QString *errorCode)
     // Использование списывается ЗДЕСЬ — то есть после того, как получатель
     // доказал владение ключом (§5) и, если раздача спрашивает, владелец
     // сказал «да». Бот, дёрнувший ссылку без фрагмента, до этой строки не
-    // доходит и ничего не сжигает.
-    if (m_usesLeft > 0)
+    // доходит и ничего не сжигает. Вернувшийся по токену его уже потратил.
+    if (rejoin.isEmpty() && m_usesLeft > 0)
         --m_usesLeft;
+    m_rejoin.remove(rejoin);
 
     QJsonObject ok;
     ok[QStringLiteral("type")] = QStringLiteral("hello_ok");
@@ -499,6 +542,10 @@ bool TransferSession::admit(ClientSession *receiver, QString *errorCode)
     ok[QStringLiteral("uses_left")] = m_usesLeft;
     ok[QStringLiteral("from_chunk")] = double(receiver->cursor());
     ok[QStringLiteral("features")] = serverFeatures();
+    ok[QStringLiteral("rejoin")] = QString::fromLatin1(issueRejoin(receiver).toBase64(
+        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+    if (senderAway())
+        ok[QStringLiteral("sender_away")] = true;
     receiver->sendJson(ok);
 
     // Сегменты хешей — сразу за hello_ok и раньше первого фрейма (он
@@ -562,8 +609,30 @@ void TransferSession::detach(ClientSession *session)
         if (m_owner == session)
             m_owner = nullptr;
         session->setTransfer(nullptr);
+        // Сокет пропал, а «ухожу» отправитель не говорил — значит это
+        // обрыв, и он обещал вернуться. Ждём его, если без него раздаче
+        // жить не на чем; если есть на чём — делегируем сразу, как и при
+        // уходе: вернётся — получит раздачу обратно (resumeOwner).
+        //
+        // Кроме раздачи с подтверждением: делегирование снимает его, и
+        // минута без сети пустила бы любого с ключом. Ждём и тогда — сиды
+        // отдают уже вошедшим, новые стоят у двери (attachReceiver), а не
+        // вернётся — решит onSenderLeft, как при уходе.
+        if (m_senderResumes && !m_senderLeaving && (!canDelegate() || m_requireApproval)) {
+            senderLost(QDateTime::currentMSecsSinceEpoch());
+            return;
+        }
         onSenderLeft();
         return;
+    }
+
+    // Помним, что ушёл и с чем: не докачавший может вернуться по токену,
+    // и раздачу без использований до тех пор не закрываем (checkDelegated).
+    const auto rejoin = m_rejoin.find(session->rejoinToken());
+    if (rejoin != m_rejoin.end() && rejoin->current == session) {
+        rejoin->current = nullptr;
+        rejoin->leftAtMs = QDateTime::currentMSecsSinceEpoch();
+        rejoin->complete = complete(session);
     }
 
     m_receivers.removeAll(session);
@@ -581,6 +650,8 @@ void TransferSession::detach(ClientSession *session)
             ++it;
         }
     }
+    for (auto it = m_forgotten.begin(); it != m_forgotten.end();)
+        it = it.value() == session ? m_forgotten.erase(it) : std::next(it);
     for (ClientSession *r : std::as_const(m_receivers))
         r->setBackfillHint(0);
 
@@ -593,16 +664,10 @@ void TransferSession::onSenderLeft()
 {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
 
-    // Делегировать можно, только если (§5):
-    //  — отправитель сам это разрешил;
-    //  — список хешей досчитан: без него новому получателю нечем
-    //    проверять чанки, а досчитать его некому;
-    //  — есть сид, то есть кто-то со всем томом: окно — буфер джиттера,
-    //    а не хранилище, и держать в нём файл за ушедшего мы не обещали;
-    //  — подтверждение либо выключено, либо снимается при уходе.
-    const bool delegate = m_leaveOpen && m_hashesComplete && hasSeed()
-                          && (!m_requireApproval || m_freezeOnLeave);
-    if (!delegate) {
+    // Ушёл совсем (сказал bye или не вернулся вовремя): ждать больше
+    // некого. Дальше — делегировать или закрыть (canDelegate).
+    m_senderLostAtMs = 0;
+    if (!canDelegate()) {
         // Отправитель ушёл — раздача кончилась. Тем, кто уже выкачал
         // всё, говорить нечего — они и так закончили.
         for (ClientSession *r : std::as_const(m_receivers)) {
@@ -623,17 +688,28 @@ void TransferSession::onSenderLeft()
     // Просьбы к отправителю больше не исполнятся. Живую волну запомним
     // ровно по краю окна: если владелец вернётся с томом, она продолжится
     // оттуда, а не с того, что просили и не получили.
-    for (auto it = m_askedOf.begin(); it != m_askedOf.end();) {
-        if (it.value() == nullptr) {
-            m_backfillInFlight.clear(it.key());
-            it = m_askedOf.erase(it);
-        } else {
-            ++it;
+    forgetSenderRequests();
+
+    // Клиент без диапазонов (M1, потоковый приём в браузере) берёт только
+    // живую волну и только по порядку. Без отправителя она кончается на
+    // краю окна, а взять у сидов он не умеет: если окно не доходит до конца
+    // тома, ему честнее сказать сразу, чем держать у стоящей полосы.
+    if (m_window.endIndex() < m_chunkCount) {
+        QList<ClientSession *> stuck;
+        for (ClientSession *r : std::as_const(m_receivers)) {
+            if (!r->speaks(ClientSession::FeatureRanges) && !complete(r))
+                stuck.append(r);
+        }
+        for (ClientSession *r : std::as_const(stuck)) {
+            QJsonObject err;
+            err[QStringLiteral("type")] = QStringLiteral("error");
+            err[QStringLiteral("reason")] = QString::fromLatin1(ferry::err::kSenderGone);
+            r->sendJson(err);
+            m_receivers.removeAll(r);
+            r->setTransfer(nullptr);
+            r->close();
         }
     }
-    m_requestedUpTo = qint64(m_window.endIndex()) - 1;
-    for (ClientSession *r : std::as_const(m_receivers))
-        r->setBackfillHint(0);
 
     // Подтверждение снимается: дальше пускают всех, кто знает ключ, в
     // пределах оставшихся использований. Те, кто ждал у двери, входят.
@@ -648,6 +724,81 @@ void TransferSession::onSenderLeft()
     checkDelegated(now);
 }
 
+bool TransferSession::canDelegate() const
+{
+    // Делегировать можно, только если (§5):
+    //  — отправитель сам это разрешил;
+    //  — список хешей досчитан: без него новому получателю нечем
+    //    проверять чанки, а досчитать его некому;
+    //  — есть сид, то есть кто-то со всем томом: окно — буфер джиттера,
+    //    а не хранилище, и держать в нём файл за ушедшего мы не обещали;
+    //  — подтверждение либо выключено, либо снимается при уходе.
+    return m_leaveOpen && m_hashesComplete && hasSeed()
+           && (!m_requireApproval || m_freezeOnLeave);
+}
+
+void TransferSession::senderLost(qint64 nowMs)
+{
+    m_senderLostAtMs = nowMs;
+    forgetSenderRequests();
+    qInfo().noquote() << QStringLiteral("связь с отправителем пропала, ждём его %1 с")
+                             .arg(kSenderGraceMs / 1000);
+    broadcastToReceivers(stateJson(nowMs));
+    pump();
+}
+
+void TransferSession::checkSenderGrace(qint64 nowMs)
+{
+    if (m_senderLostAtMs == 0 || m_state != State::Active)
+        return;
+    if (nowMs - m_senderLostAtMs < kSenderGraceMs)
+        return;
+    qInfo().noquote() << QStringLiteral("отправитель не вернулся");
+    onSenderLeft();
+}
+
+void TransferSession::senderLeaving(ClientSession *session)
+{
+    if (session && session != m_sender)
+        return;
+    m_senderLeaving = true;
+    // Связь уже пропала, и раздача ждёт — дальше ждать нечего.
+    if (m_senderLostAtMs != 0 && m_state == State::Active)
+        onSenderLeft();
+}
+
+void TransferSession::forgetSenderRequests()
+{
+    for (auto it = m_askedOf.begin(); it != m_askedOf.end();) {
+        if (it.value() == nullptr) {
+            m_backfillInFlight.clear(it.key());
+            it = m_askedOf.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    m_requestedUpTo = qint64(m_window.endIndex()) - 1;
+    for (ClientSession *r : std::as_const(m_receivers))
+        r->setBackfillHint(0);
+}
+
+QJsonObject TransferSession::approvalRequestJson(const ClientSession *receiver) const
+{
+    QJsonObject ask;
+    ask[QStringLiteral("type")] = QStringLiteral("approval_request");
+    ask[QStringLiteral("receiver")] = int(receiver->receiverId());
+    ask[QStringLiteral("name")] = receiver->name();
+    return ask;
+}
+
+void TransferSession::sendPendingToOwner()
+{
+    if (!m_owner)
+        return;
+    for (const ClientSession *r : std::as_const(m_pending))
+        m_owner->sendJson(approvalRequestJson(r));
+}
+
 bool TransferSession::complete(const ClientSession *receiver) const
 {
     const quint64 done = receiver->speaks(ClientSession::FeatureRanges)
@@ -660,6 +811,40 @@ bool TransferSession::hasSeed() const
 {
     for (const ClientSession *r : m_receivers) {
         if (canSeed(r) && r->backfillStrikes() < kMaxStrikes && complete(r))
+            return true;
+    }
+    return false;
+}
+
+QByteArray TransferSession::issueRejoin(ClientSession *receiver)
+{
+    // Помним не всех: раздачу без лимита могут брать тысячи. Сначала
+    // забываем ушедших с томом, потом самых давних из ушедших.
+    while (m_rejoin.size() >= kMaxRejoinTokens) {
+        auto victim = m_rejoin.end();
+        for (auto it = m_rejoin.begin(); it != m_rejoin.end(); ++it) {
+            if (it->current)
+                continue;
+            if (victim == m_rejoin.end() || (it->complete && !victim->complete)
+                || (it->complete == victim->complete && it->leftAtMs < victim->leftAtMs))
+                victim = it;
+        }
+        if (victim == m_rejoin.end())
+            break;   // все на связи — их не больше потолка одновременных
+        m_rejoin.erase(victim);
+    }
+
+    QByteArray token(int(ferry::kRejoinTokenSize), 0);
+    QRandomGenerator::system()->generate(token.begin(), token.end());
+    m_rejoin.insert(token, Rejoin{receiver, 0, false});
+    receiver->setRejoinToken(token);
+    return token;
+}
+
+bool TransferSession::rejoinExpected(qint64 nowMs) const
+{
+    for (const Rejoin &r : m_rejoin) {
+        if (!r.current && !r.complete && nowMs - r.leftAtMs < kRejoinGraceMs)
             return true;
     }
     return false;
@@ -695,8 +880,9 @@ void TransferSession::checkDelegated(qint64 nowMs)
     }
 
     // Использования кончились, и всем, кто внутри, уже хватает. Новых не
-    // пустят, старым ничего не нужно — ссылка гаснет.
-    if (allDone && m_usesLeft == 0) {
+    // пустят, старым ничего не нужно — ссылка гаснет. Если только не ждём
+    // недокачавшего, у которого оборвалась связь: он вернётся по токену.
+    if (allDone && m_usesLeft == 0 && !rejoinExpected(nowMs)) {
         qInfo().noquote() << QStringLiteral("раздача без отправителя закрыта: использования кончились");
         closeWith(QString::fromLatin1(ferry::err::kUsesExhausted));
         emit needsClosing(this);
@@ -709,7 +895,8 @@ void TransferSession::checkDelegated(qint64 nowMs)
         m_window.dropBefore(m_window.endIndex());
 }
 
-bool TransferSession::resumeOwner(ClientSession *session, bool serve, QString *errorCode)
+bool TransferSession::resumeOwner(ClientSession *session, bool serve, bool resumes,
+                                  QString *errorCode)
 {
     const auto fail = [&](const char *code) {
         if (errorCode)
@@ -718,9 +905,27 @@ bool TransferSession::resumeOwner(ClientSession *session, bool serve, QString *e
     };
     if (!m_hasOffer || (m_state != State::Active && m_state != State::Delegated))
         return fail(ferry::err::kNotFound);
-    // Отправитель на связи — он и владелец, второго не бывает.
-    if (m_sender)
+    // Отправитель на связи — он и владелец, второго пульта не бывает.
+    if (m_sender && !serve)
         return fail(ferry::err::kOwnerConflict);
+
+    // Вернулся отправитель с томом, а старый его сокет ещё числится. Это
+    // он же: токен тот же, а прежнее соединение после смены сети мертво,
+    // и TCP узнает об этом через минуты. Старое отцепляем сразу — иначе
+    // его disconnected пришёл бы позже и закрыл раздачу уже вернувшемуся.
+    if (m_sender) {
+        ClientSession *old = m_sender;
+        m_sender = nullptr;
+        if (m_owner == old)
+            m_owner = nullptr;
+        QJsonObject err;
+        err[QStringLiteral("type")] = QStringLiteral("error");
+        err[QStringLiteral("reason")] = QString::fromLatin1(ferry::err::kOwnerConflict);
+        old->sendJson(err);
+        old->setTransfer(nullptr);
+        old->setRole(ClientSession::Role::Unknown);
+        old->close();
+    }
 
     if (m_owner) {
         QJsonObject err;
@@ -739,6 +944,12 @@ bool TransferSession::resumeOwner(ClientSession *session, bool serve, QString *e
         session->setRole(ClientSession::Role::Sender);
         m_state = State::Active;
         m_noSeedSinceMs = 0;
+        m_senderLostAtMs = 0;
+        m_senderLeaving = false;
+        m_senderResumes = resumes;
+        // Что просили у прежнего сокета, с ним и пропало: живую волну
+        // попросим заново от края окна.
+        forgetSenderRequests();
         m_lastGrowthMs = QDateTime::currentMSecsSinceEpoch();
         broadcastToReceivers(stateJson(m_lastGrowthMs));
     } else {
@@ -1010,6 +1221,7 @@ bool TransferSession::onSenderFrame(const QByteArray &frame, QString *errorCode)
     if (m_backfillInFlight.has(index)) {
         m_backfillInFlight.clear(index);
         m_lastGrowthMs = QDateTime::currentMSecsSinceEpoch();
+        m_backfillArrivedMs = m_lastGrowthMs;
         deliverBackfillFrame(index, frame, false);
         pump();
         return true;
@@ -1077,7 +1289,14 @@ bool TransferSession::onPeerFrame(ClientSession *peer, const QByteArray &frame,
     // Без этой проверки любой подключившийся мог бы подмешивать
     // байты в чужую раздачу — и хотя получатель всё равно проверит хеш
     // и выбросит мусор, трафик и время были бы потрачены чужими.
-    if (!m_backfillInFlight.has(index) || m_askedOf.value(index, nullptr) != peer)
+    //
+    // «Попросили» — хоть когда-то, а не обязательно сейчас. Сторож второй
+    // волны (forgetStalledBackfill) забывает просьбы к сиду, который не
+    // уложился в срок, и просит заново — а сид с медленным аплоадом их уже
+    // везёт и привезёт, иногда и дважды. Опоздавший чанк — наш же заказ:
+    // рвать за него связь значило бы потерять сида, который просто
+    // медленный, а с ним, без отправителя, и раздачу.
+    if (!peer->askedToServe().has(index))
         return fail(ferry::err::kBadMessage);
 
     const ferry::ChunkPlan plan = ferry::planWith(m_totalBytes, m_chunkSize);
@@ -1086,10 +1305,27 @@ bool TransferSession::onPeerFrame(ClientSession *peer, const QByteArray &frame,
     if (frame.size() != expect)
         return fail(ferry::err::kBadMessage);
 
-    m_backfillInFlight.clear(index);
-    m_askedOf.remove(index);
+    // Пришёл чанк, просьбу о котором сторож уже сбросил, — от того же, у
+    // кого просили. Значит сид не молчал, а вёз, и теперь повезёт ещё и
+    // повтор. Срок сторожа мал для этого канала: удваиваем, иначе каждый
+    // сброс добавлял бы сиду очередь повторов, и полезная скорость падала
+    // бы всё ниже.
+    const auto forgot = m_forgotten.constFind(index);
+    if (forgot != m_forgotten.cend() && forgot.value() == peer) {
+        m_backfillStallMs = std::min(kMaxBackfillStallMs, m_backfillStallMs * 2);
+        m_forgotten.clear();
+    }
+
+    // Просьба к нему ещё числится — закрываем её. Если чанк тем временем
+    // попросили у другого, его просьбу не трогаем: чей придёт первым, тот и
+    // уедет, второй уже никому не нужен (deliverBackfillFrame смотрит sent).
+    if (m_backfillInFlight.has(index) && m_askedOf.value(index, nullptr) == peer) {
+        m_backfillInFlight.clear(index);
+        m_askedOf.remove(index);
+    }
     m_servedBy.insert(index, {peer, QDateTime::currentMSecsSinceEpoch()});
     m_lastGrowthMs = QDateTime::currentMSecsSinceEpoch();
+    m_backfillArrivedMs = m_lastGrowthMs;
 
     deliverBackfillFrame(index, frame, true);
     pump();
@@ -1187,6 +1423,10 @@ void TransferSession::tick(qint64 nowMs)
         checkDelegated(nowMs);
         return;
     }
+    if (m_senderLostAtMs != 0) {
+        checkSenderGrace(nowMs);
+        return;
+    }
     if (!m_sender)
         return;
 
@@ -1210,10 +1450,20 @@ void TransferSession::forgetStalledBackfill(qint64 nowMs)
     // Тот же сторож, но для второй волны, и без него здесь хуже, чем
     // с живой: потолок чанков в пути маленький, и одна потерянная
     // просьба заняла бы четверть полосы навсегда.
+    //
+    // Срок считается от последнего признака жизни полосы — просьбы или
+    // пришедшего чанка — и не короче, чем чанк идёт по медленному аплоаду:
+    // сид отдаёт своим каналом, а он бывает и 150 КБ/с (мобильная сеть,
+    // ADSL). Мегабайтный чанк едет так семь секунд, и сторож на пяти
+    // забывал бы всё, что сид честно везёт.
+    //
+    // Если и такой срок мал — сброшенное всё же приходит, — он удваивается
+    // (onPeerFrame), до kMaxBackfillStallMs.
     if (m_backfillInFlight.empty() || m_backfillAskedMs == 0)
         return;
-    if (nowMs - m_backfillAskedMs < kStallMs)
+    if (nowMs - std::max(m_backfillAskedMs, m_backfillArrivedMs) < m_backfillStallMs)
         return;
+    m_forgotten = m_askedOf;
     m_backfillInFlight.reset(m_chunkCount);
     m_askedOf.clear();
     m_backfillAskedMs = 0;
@@ -1446,6 +1696,8 @@ void TransferSession::requestBackfill()
 
             m_backfillInFlight.set(i);
             m_askedOf.insert(i, peer);
+            if (peer)
+                peer->askedToServe().set(i);
             r->setBackfillHint(i);
 
             QJsonArray range;
@@ -1494,8 +1746,8 @@ void TransferSession::deliverBackfillFrame(quint64 index, const QByteArray &fram
     for (ClientSession *r : std::as_const(m_receivers)) {
         if (!r->speaks(ClientSession::FeatureRanges))
             continue;
-        if (r->have().has(index))
-            continue;
+        if (r->have().has(index) || r->sent().has(index))
+            continue;   // есть или уже едет — второй копией (опоздавшей) не засыпаем
         if (m_sender && index >= r->cursor())
             continue;   // это ему привезёт живая волна
         r->sendBinary(frame);
