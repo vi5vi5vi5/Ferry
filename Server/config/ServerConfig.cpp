@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QFile>
 #include <QHash>
+#include <QRegularExpression>
 #include <QTextStream>
 
 #include <algorithm>
@@ -55,7 +56,7 @@ bool readIniFile(const QString &path, Values &out, QStringList *warnings)
 void readEnvironment(Values &out)
 {
     static const char *kKnown[] = {
-        "server.name", "server.public_url",
+        "server.name", "server.public_url", "server.cors_origins",
         "transfer.window_mb", "transfer.ram_budget_mb", "transfer.max_transfers",
         "transfer.max_concurrent", "transfer.default_ttl_s", "transfer.max_ttl_s",
         "limits.create_per_ip_per_min", "limits.max_transfers_per_ip",
@@ -130,6 +131,26 @@ ServerConfig ServerConfig::load(const QString &filePath, QStringList *warnings)
     // Хвостовой слэш ломал бы склейку ссылки: получилось бы https://host//t/id.
     while (c.publicUrl.endsWith(QLatin1Char('/')))
         c.publicUrl.chop(1);
+
+    // Список через запятую или пробел. Браузер присылает Origin без пути и
+    // без слэша на конце — такими их и храним, иначе сравнение не сойдётся.
+    const auto cors = values.constFind(QStringLiteral("server.cors_origins"));
+    if (cors != values.constEnd()) {
+        c.corsOrigins.clear();
+        const QStringList parts = cors.value().split(QRegularExpression(QStringLiteral("[,\\s]+")),
+                                                     Qt::SkipEmptyParts);
+        for (QString origin : parts) {
+            while (origin.endsWith(QLatin1Char('/')))
+                origin.chop(1);
+            if (origin == QLatin1String("*") || origin.startsWith(QLatin1String("https://"))
+                || origin.startsWith(QLatin1String("http://"))) {
+                c.corsOrigins.append(origin);
+            } else if (warnings) {
+                warnings->append(QStringLiteral("server.cors_origins: «%1» — не адрес сайта "
+                                                "(нужно https://имя), пропущено").arg(origin));
+            }
+        }
+    }
 
     c.windowMb = intValue(values, "transfer.window_mb", c.windowMb, 1, 4096, warnings);
     c.ramBudgetMb = intValue(values, "transfer.ram_budget_mb", c.ramBudgetMb, 16, 262144, warnings);

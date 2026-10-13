@@ -37,6 +37,10 @@ struct ApiResponse
 //   GET  /api/transfers/<id>          метаданные          ничего не сжигает
 //   GET  /api/transfers/<id>/challenge  16 случайных байт
 //   GET  /api/health                  жив ли, и на каких настройках
+//
+// Всем ответам /api дописываются заголовки CORS по server.cors_origins, а
+// предварительный запрос браузера (OPTIONS) получает ответ здесь же — см.
+// corsHeaders.
 class HttpApi : public QObject
 {
     Q_OBJECT
@@ -56,6 +60,10 @@ private:
     void handleOwnerBeacon(const QByteArray &id, const QByteArray &body, bool revoke,
                            const Responder &respond);
     void handleHealth(const Responder &respond);
+
+    // Заголовки CORS для этого запроса: разрешён его Origin — Allow-Origin
+    // (и Vary, если список не «*»), нет — пусто, и браузер ответ не покажет.
+    QList<QPair<QByteArray, QByteArray>> corsHeaders(const HttpRequest &req) const;
 
     TransferRegistry *m_registry;      // не владеет
     ChallengeStore *m_challenges;      // не владеет

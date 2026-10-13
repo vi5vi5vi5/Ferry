@@ -2,6 +2,8 @@
 
 #include <QDateTime>
 
+#include <algorithm>
+
 #include "config/Log.h"
 #include "config/ServerConfig.h"
 #include "core/ChallengeStore.h"
@@ -43,10 +45,44 @@ HttpApi::HttpApi(TransferRegistry *registry, ChallengeStore *challenges,
 {
 }
 
-bool HttpApi::route(const HttpRequest &req, const Responder &respond)
+bool HttpApi::route(const HttpRequest &req, const Responder &plainRespond)
 {
     if (!req.path.startsWith(QLatin1String("/api/")))
         return false;
+
+    // CORS — каждому ответу, включая отказы: страница на чужом адресе иначе
+    // не увидела бы даже кода ошибки, только «сетевой сбой».
+    const QList<QPair<QByteArray, QByteArray>> cors = corsHeaders(req);
+    const Responder respond = cors.isEmpty()
+        ? plainRespond
+        : Responder([plainRespond, cors](const ApiResponse &resp) {
+              ApiResponse withCors = resp;
+              withCors.headers += cors;
+              plainRespond(withCors);
+          });
+
+    // Предварительный запрос браузера: можно ли прислать сюда такое. Его
+    // вызывают заголовок X-Ferry-Features у GET метаданных и JSON в теле
+    // POST. Тело пустое, статус 200 — 204 не дал бы прислать Content-Length,
+    // а наш транспорт ставит его всегда.
+    if (req.method == "OPTIONS") {
+        ApiResponse r;
+        r.contentType = QByteArrayLiteral("text/plain; charset=utf-8");
+        const bool allowed = std::any_of(cors.cbegin(), cors.cend(), [](const auto &h) {
+            return h.first == "Access-Control-Allow-Origin";
+        });
+        if (allowed) {
+            r.headers.append({QByteArrayLiteral("Access-Control-Allow-Methods"),
+                              QByteArrayLiteral("GET, POST")});
+            r.headers.append({QByteArrayLiteral("Access-Control-Allow-Headers"),
+                              QByteArrayLiteral("Content-Type, X-Ferry-Features")});
+            // Сутки браузер не переспрашивает: ответ зависит только от
+            // настроек релея, а они меняются перезапуском.
+            r.headers.append({QByteArrayLiteral("Access-Control-Max-Age"), QByteArrayLiteral("86400")});
+        }
+        respond(r);
+        return true;
+    }
 
     if (req.path == QLatin1String("/api/health")) {
         if (req.method != "GET") {
@@ -122,6 +158,24 @@ bool HttpApi::route(const HttpRequest &req, const Responder &respond)
 
     respond(ApiResponse::error(404, "not_found"));
     return true;
+}
+
+QList<QPair<QByteArray, QByteArray>> HttpApi::corsHeaders(const HttpRequest &req) const
+{
+    QList<QPair<QByteArray, QByteArray>> h;
+    if (m_config.corsOrigins.isEmpty())
+        return h;
+    if (m_config.corsOrigins.contains(QStringLiteral("*"))) {
+        h.append({QByteArrayLiteral("Access-Control-Allow-Origin"), QByteArrayLiteral("*")});
+        return h;
+    }
+    // Список: ответ зависит от Origin, и кэш по дороге обязан это знать —
+    // иначе отдал бы разрешение одного сайта другому.
+    h.append({QByteArrayLiteral("Vary"), QByteArrayLiteral("Origin")});
+    const QByteArray origin = req.header(QByteArrayLiteral("origin"));
+    if (!origin.isEmpty() && m_config.corsOrigins.contains(QString::fromLatin1(origin)))
+        h.append({QByteArrayLiteral("Access-Control-Allow-Origin"), origin});
+    return h;
 }
 
 void HttpApi::handleCreate(const HttpRequest &req, const Responder &respond)
